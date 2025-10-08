@@ -1,5 +1,6 @@
 {
   "rules": [
+    { "pathPattern": "/actions/job/registerCIDs", "apiPath": "/api/actions/job/registerCIDs" },
     { "pathPattern": "/actions/job/submit", "apiPath": "/api/actions/job/submit" }
   ]
 }
