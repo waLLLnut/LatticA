@@ -1,12 +1,12 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { LatticaCoprocessor } from "../target/types/lattica_coprocessor";
+import { LatticaGatekeeper } from "../target/types/lattica_gatekeeper";
 
-describe("lattica-coprocessor", () => {
+describe("lattica-gatekeeper", () => {
   // Configure the client to use the local cluster.
   anchor.setProvider(anchor.AnchorProvider.env());
 
-  const program = anchor.workspace.latticaCoprocessor as Program<LatticaCoprocessor>;
+  const program = anchor.workspace.latticaGatekeeper as Program<LatticaGatekeeper>;
 
   it("Is initialized!", async () => {
     // Add your test here.

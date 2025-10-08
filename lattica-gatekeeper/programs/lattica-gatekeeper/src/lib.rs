@@ -1,9 +1,9 @@
 use anchor_lang::prelude::*;
 
-declare_id!("FYVh8n6CBbr6nm6P98wDxcWMNYAVHZRcEdR62XG9uBCu");
+declare_id!("kRahi685jxKyTgcQadEPwyEKR8xtP9T21qmpwMfzSid");
 
 #[program]
-pub mod lattica_coprocessor {
+pub mod lattica_gatekeeper {
     use super::*;
 
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
