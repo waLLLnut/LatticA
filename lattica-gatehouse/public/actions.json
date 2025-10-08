@@ -1,0 +1,5 @@
+{
+  "rules": [
+    { "pathPattern": "/actions/job/submit", "apiPath": "/api/actions/job/submit" }
+  ]
+}
