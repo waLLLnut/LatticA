@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-lattica_gatekeeper = "kRahi685jxKyTgcQadEPwyEKR8xtP9T21qmpwMfzSid"
+lattica_gatekeeper = "GateF9qDULEJRgt6m1prkmUWrEXGVhDzYCgCJtGtnwu9"
 
 [registry]
 url = "https://api.apr.dev"
