@@ -1,31 +1,41 @@
-// /app/api/actions/job/submit/route.ts
+/**
+ * Solana Actions API: Submit Confidential Job
+ * Creates transactions for submitting FHE jobs with registered CID references
+ */
 import { NextRequest, NextResponse } from 'next/server'
 import {
   PublicKey,
   Transaction,
   TransactionInstruction,
   SystemProgram,
+  Connection,
 } from '@solana/web3.js'
 import crypto from 'crypto'
+import bs58 from 'bs58'
 
-/* ============================== CORS ============================== */
+const connection = new Connection('https://api.devnet.solana.com', 'confirmed')
+const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr')
+const MAX_CIDS = 16
+
 function setCors(res: NextResponse) {
   res.headers.set('Access-Control-Allow-Origin', '*')
   res.headers.set('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS')
   res.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Content-Encoding, Accept-Encoding')
   return res
 }
-export async function OPTIONS() { return setCors(new NextResponse(null, { status: 200 })) }
 
-/* ========================== FHE-CPK BUNDLE ======================== */
-// Demo bundle (production: on-chain/off-chain signature verification required)
+export async function OPTIONS() { 
+  return setCors(new NextResponse(null, { status: 200 })) 
+}
+
+// FHE Collective Public Key configuration (demo values)
 function getFHEcpkInfo() {
   return {
     cpk_id: 'v1-2025',
     cpk_pub: 'base64_public_key_here',
     domain: {
-      chain_id: 'mainnet-beta',
-      gatekeeper_program: 'GateKeep3r11111111111111111111111111111111',
+      chain_id: 'devnet',
+      gatekeeper_program: 'GateF9qDULEJRgt6m1prkmUWrEXGVhDzYCgCJtGtnwu9',
       key_epoch: 7,
       key_expiry_slot: 234567890,
       fhe_scheme: 'FHE16',
@@ -40,193 +50,191 @@ function getFHEcpkInfo() {
   }
 }
 
-/* ============================ HASH UTILS ========================== */
-// sha256(hex) helper (production: keccak256 etc. can be adopted)
-function sha256Hex(buf: Buffer | string) {
+// Hash utilities
+function sha256Hex(buf: Buffer | string): string {
   const b = typeof buf === 'string' ? Buffer.from(buf) : buf
   return '0x' + crypto.createHash('sha256').update(b).digest('hex')
 }
-const hex32 = (h0x: string) => {
+
+function hex32(h0x: string): Buffer {
   const h = h0x.startsWith('0x') ? h0x.slice(2) : h0x
-  if (h.length !== 64) throw new Error('expected 32-byte hex')
+  if (h.length !== 64) throw new Error('Expected 32-byte hex string')
   return Buffer.from(h, 'hex')
 }
-function canonicalJson(obj: unknown) {
-  // Simple normalization: key sorting (JSON Canonicalization Scheme recommended)
+
+function canonicalJson(obj: unknown): string {
   return JSON.stringify(obj, Object.keys(obj as Record<string, unknown>).sort())
 }
 
-/* ======================= COMMITMENT FORMULA ======================= */
 /**
- * inputs_commit    = sha256( concat(CID_1 || CID_2 || ... || CID_n) )
- * enc_params_hash  = sha256( canonical_json(enc_params) )
- * policy_hash      = sha256( canonical_json(policy_ctx) )
- * domain_hash      = sha256( chain_id || gatekeeper_program || cpk_id || key_epoch )
- * commitment       = sha256( inputs_commit || ir_digest || enc_params_hash || policy_hash || domain_hash || nonce )
- *
- * All bytes are assumed to be unified as 32-byte hex (0x + 64) and then concatenated.
+ * Commitment formula (matches on-chain gatekeeper contract):
+ *   cid_set_id = sha256(cid_handle_1 || cid_handle_2 || ...)
+ *   policy_hash = sha256(canonical_json(policy_ctx))
+ *   domain_hash = sha256(chain_id || program || cpk_id || epoch)
+ *   commitment = sha256(cid_set_id || ir_digest || policy_hash || domain_hash || nonce)
  */
-function calcInputsCommit(inputs: Array<{ cid: string }>) {
-  const concat = inputs.map(i => i.cid).join('')
-  return sha256Hex(Buffer.from(concat, 'utf8'))
+function calcCidSetId(cidHandles: string[]): string {
+  const parts = cidHandles.map((b58str) => Buffer.from(bs58.decode(b58str)))
+  const buf = Buffer.allocUnsafe(parts.length * 32)
+  parts.forEach((p, i) => p.copy(buf, i * 32))
+  return sha256Hex(buf)
 }
-function calcEncParamsHash(encParams: unknown) {
-  return sha256Hex(Buffer.from(canonicalJson(encParams), 'utf8'))
-}
-function calcPolicyHash(policyCtx: unknown) {
+
+function calcPolicyHash(policyCtx: unknown): string {
   return sha256Hex(Buffer.from(canonicalJson(policyCtx), 'utf8'))
 }
-function calcDomainHash(fhe: ReturnType<typeof getFHEcpkInfo>) {
-  const parts = Buffer.concat([
+
+function calcDomainHash(fhe: ReturnType<typeof getFHEcpkInfo>): string {
+  return sha256Hex(Buffer.concat([
     Buffer.from(fhe.domain.chain_id, 'utf8'),
     Buffer.from(fhe.domain.gatekeeper_program, 'utf8'),
     Buffer.from(fhe.cpk_id, 'utf8'),
     Buffer.from(String(fhe.domain.key_epoch), 'utf8'),
-  ])
-  return sha256Hex(parts)
+  ]))
 }
+
 function calcCommitment(
-  inputsCommit: string,
+  cidSetId: string,
   irDigest: string,
-  encParamsHash: string,
   policyHash: string,
   domainHash: string,
   nonceHex32: string,
-) {
-  const concat = Buffer.concat([
-    hex32(inputsCommit),
+): string {
+  return sha256Hex(Buffer.concat([
+    hex32(cidSetId),
     hex32(irDigest),
-    hex32(encParamsHash),
     hex32(policyHash),
     hex32(domainHash),
     hex32(nonceHex32),
-  ])
-  return sha256Hex(concat)
+  ]))
 }
 
-/* ========================== PDA & INSTRUCTION ===================== */
-// Anchor global discriminator
-const submitDiscriminator = crypto.createHash('sha256').update('global:submit_job').digest().subarray(0, 8)
+// Anchor discriminator for submit_job instruction
+const SUBMIT_DISCRIMINATOR = crypto
+  .createHash('sha256')
+  .update('global:submit_job')
+  .digest()
+  .subarray(0, 8)
 
-function buildSubmitJobIx(args: {
+function buildSubmitJobInstruction(args: {
   gatekeeperProgram: PublicKey
   submitter: PublicKey
+  batch: PublicKey
+  cidSetIdHex: string
   commitmentHex: string
   irDigestHex: string
-  encParamsHashHex: string
   policyHashHex: string
   configPda: PublicKey
   jobPda: PublicKey
-}) {
+  cidHandles: PublicKey[]
+  provenance: number
+}): TransactionInstruction {
   const data = Buffer.concat([
-    submitDiscriminator,
+    SUBMIT_DISCRIMINATOR,
+    args.batch.toBuffer(),
+    hex32(args.cidSetIdHex),
     hex32(args.commitmentHex),
     hex32(args.irDigestHex),
-    hex32(args.encParamsHashHex),
     hex32(args.policyHashHex),
+    Buffer.from([args.provenance]),
   ])
+  
   const keys = [
     { pubkey: args.configPda, isSigner: false, isWritable: false },
-    { pubkey: args.jobPda,     isSigner: false, isWritable: true  },
-    { pubkey: args.submitter,  isSigner: true,  isWritable: true  },
+    { pubkey: args.jobPda, isSigner: false, isWritable: true },
+    { pubkey: args.batch, isSigner: false, isWritable: false },
+    { pubkey: args.submitter, isSigner: true, isWritable: true },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ...args.cidHandles.map(cid => ({ 
+      pubkey: cid, 
+      isSigner: false, 
+      isWritable: false 
+    }))
   ]
-  return new TransactionInstruction({ programId: args.gatekeeperProgram, keys, data })
-}
-function deriveConfigPda(programId: PublicKey) {
-  return PublicKey.findProgramAddressSync([Buffer.from('config')], programId)[0]
-}
-function deriveJobPda(programId: PublicKey, commitmentHex: string, submitter: PublicKey) {
-  return PublicKey.findProgramAddressSync([Buffer.from('job'), hex32(commitmentHex), submitter.toBuffer()], programId)[0]
+  
+  return new TransactionInstruction({ 
+    programId: args.gatekeeperProgram, 
+    keys, 
+    data 
+  })
 }
 
-/* =============================== GET ============================== */
+function deriveConfigPda(programId: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync([Buffer.from('config')], programId)[0]
+}
+
+function deriveJobPda(programId: PublicKey, commitmentHex: string, submitter: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from('job'), hex32(commitmentHex), submitter.toBuffer()], 
+    programId
+  )[0]
+}
+
 export async function GET(request: NextRequest) {
   const fhe = getFHEcpkInfo()
   const domain_hash = calcDomainHash(fhe)
   
-  // Check for preview parameters
   const { searchParams } = new URL(request.url)
-  const inputsParam = searchParams.get('inputs')
-  const regIdParam = searchParams.get('reg_id')
+  const cidsParam = searchParams.get('cids')
   
   let preview = null
-  if (inputsParam || regIdParam) {
-    // Preview mode: validate inputs and show status
+  if (cidsParam) {
     try {
-      const inputs = inputsParam ? JSON.parse(inputsParam) : []
-      const cidsOk = Array.isArray(inputs) && inputs.every((i: unknown) => 
-        typeof i === 'object' && i !== null && 'cid' in i && 
-        typeof (i as { cid: unknown }).cid === 'string' && 
-        (i as { cid: string }).cid.startsWith('Qm')
-      )
+      const cids = JSON.parse(cidsParam)
+      const cid_count = Array.isArray(cids) ? cids.length : 0
       
       preview = {
-        status: cidsOk ? 'ready' : 'invalid',
-        inputs_count: inputs.length,
-        message: cidsOk 
-          ? 'CIDs are valid and ready for job submission'
-          : 'Invalid CIDs format. Use /api/actions/job/registerCIDs first.'
+        status: cid_count > 0 && cid_count <= MAX_CIDS ? 'ready' : 'invalid',
+        cid_count,
+        message: cid_count > 0 && cid_count <= MAX_CIDS
+          ? `Ready to submit job with ${cid_count} CID reference(s)`
+          : cid_count > MAX_CIDS
+          ? `Too many CIDs (max ${MAX_CIDS})`
+          : 'No CIDs provided. Use /api/actions/job/registerCIDs first.'
       }
     } catch {
-      preview = {
-        status: 'error',
-        message: 'Invalid inputs parameter format'
-      }
+      preview = { status: 'error', message: 'Invalid cids parameter format' }
     }
   }
 
-  // Include policy/domain/hash specs in GET so users can pre-validate
   const body = {
     type: 'action',
     icon: 'http://localhost:3000/logo.png',
     title: 'Gatekeeper · Submit Confidential Job',
-    description:
-      'Submit a confidential computation job using registered CIDs. This endpoint returns a signable transaction (no partial signature).',
+    description: 'Submit a confidential computation job using registered CIDs.',
     label: 'Submit Confidential Job',
     disabled: false,
-
-     // 👇 User verification info (policy/domain/hash specs)
     policy: {
       hashAlgorithm: 'sha256',
-      inputRequirement: 'inputs = JSON array of {cid} from registered CIDs (use /registerCIDs first).',
-      canonicalization: 'enc_params/policy_ctx are canonical-JSON stringified (sorted keys).',
+      inputRequirement: `cids = JSON array of CID PDA addresses from /registerCIDs (max ${MAX_CIDS}).`,
+      canonicalization: 'policy_ctx is canonical-JSON stringified (sorted keys).',
       nonce: '32-byte hex (0x + 64). If omitted on POST, server generates and returns it.',
+      remaining_accounts: 'CID handles are passed as remaining_accounts in transaction',
     },
-    domain: {
-      ...fhe,
-      domain_hash, // sha256(chain_id || gatekeeper_program || cpk_id || key_epoch)
-    },
+    domain: { ...fhe, domain_hash },
     hashSpec: {
-      inputs_commit: 'sha256(concat(CID_1 || ... || CID_n)) -> 32B hex',
-      enc_params_hash: 'sha256(canonical_json(enc_params)) -> 32B hex',
+      cid_set_id: 'sha256(concat(cid_handle_1 || cid_handle_2 || ... )) -> 32B hex',
       policy_hash: 'sha256(canonical_json(policy_ctx)) -> 32B hex',
-      domain_hash: 'sha256(chain_id || gatekeeper_program || cpk_id || key_epoch) -> 32B hex',
-      commitment:
-        'sha256(inputs_commit || ir_digest || enc_params_hash || policy_hash || domain_hash || nonce) -> 32B hex',
-      argOrder: ['commitment', 'ir_digest', 'enc_params_hash', 'policy_hash'],
-      accountsOrder: ['config (PDA["config"])', 'job (PDA["job", commitment, submitter])', 'submitter', 'system'],
+      domain_hash: 'sha256(chain_id || program || cpk_id || epoch) -> 32B hex',
+      commitment: 'sha256(cid_set_id || ir_digest || policy_hash || domain_hash || nonce) -> 32B hex',
+      argOrder: ['batch', 'cid_set_id', 'commitment', 'ir_digest', 'policy_hash', 'provenance'],
+      accountsOrder: ['config', 'job', 'batch', 'submitter', 'system_program', '...cid_handles (remaining)'],
     },
-
-    // Preview information if inputs provided
     ...(preview && { preview }),
-
-     // Actions spec: user input guide
     links: {
-      actions: [
-        {
-          type: 'post',
-          href: '/api/actions/job/submit',
-          label: 'Submit Job',
-          parameters: [
-            { name: 'inputs', label: 'Registered CIDs (JSON)', required: true, type: 'textarea' },
-            { name: 'ir_digest', label: 'IR Digest (0x…64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
-            { name: 'enc_params', label: 'Encryption Params (JSON)', required: true, type: 'textarea' },
-            { name: 'policy_ctx', label: 'Policy Context (JSON)', required: true, type: 'textarea' },
-            { name: 'nonce', label: 'Optional Nonce (0x…64hex)', required: false, pattern: '^0x[0-9a-fA-F]{64}$' },
-          ],
-        },
-      ],
+      actions: [{
+        type: 'post',
+        href: '/api/actions/job/submit',
+        label: 'Submit Job',
+        parameters: [
+          { name: 'cids', label: 'Registered CID PDAs (JSON array)', required: true, type: 'textarea' },
+          { name: 'batch', label: 'Batch Window Pubkey', required: true, type: 'text' },
+          { name: 'ir_digest', label: 'IR Digest (0x…64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
+          { name: 'policy_ctx', label: 'Policy Context (JSON)', required: true, type: 'textarea' },
+          { name: 'provenance', label: 'Provenance (0=server, 1=client)', required: false, type: 'number' },
+          { name: 'nonce', label: 'Optional Nonce (0x…64hex)', required: false, pattern: '^0x[0-9a-fA-F]{64}$' },
+        ],
+      }],
     },
   }
   return setCors(NextResponse.json(body))
@@ -235,96 +243,114 @@ export async function GET(request: NextRequest) {
 /* =============================== POST ============================= */
 export async function POST(req: NextRequest) {
   try {
-    const { account, inputs, ir_digest, enc_params, policy_ctx, nonce } = await req.json()
+    const body = await req.json()
+    const { account, cids, batch, ir_digest, policy_ctx, provenance, nonce } = body
 
-    if (!account || !inputs || !ir_digest || !enc_params || !policy_ctx) {
-      return setCors(NextResponse.json({ message: 'Missing fields' }, { status: 400 }))
+    // Validation
+    if (!account || !cids || !batch || !ir_digest || !policy_ctx) {
+      return setCors(NextResponse.json({ 
+        message: 'Missing required fields: account, cids, batch, ir_digest, policy_ctx' 
+      }, { status: 400 }))
     }
 
-     // Parse & normalize
-    const parsedInputs: Array<{ cid: string }> = typeof inputs === 'string' ? JSON.parse(inputs) : inputs
-    const parsedEncParams = typeof enc_params === 'string' ? JSON.parse(enc_params) : enc_params
+    const parsedCids: string[] = typeof cids === 'string' ? JSON.parse(cids) : cids
     const parsedPolicyCtx = typeof policy_ctx === 'string' ? JSON.parse(policy_ctx) : policy_ctx
-    if (!Array.isArray(parsedInputs) || parsedInputs.length === 0) {
-      return setCors(NextResponse.json({ message: 'inputs must be non-empty array' }, { status: 400 }))
-    }
-     // Offchain Store existence check (demo rule - only registered CIDs)
-    const cidsOk = parsedInputs.every(i => typeof i.cid === 'string' && i.cid.startsWith('Qm'))
-    if (!cidsOk) return setCors(NextResponse.json({ message: 'CID(s) not found or invalid. Use /api/actions/job/registerCIDs first to register external inputs.' }, { status: 400 }))
+    const provenanceValue = provenance ?? 1
 
-     // Domain
+    if (!Array.isArray(parsedCids) || parsedCids.length === 0) {
+      return setCors(NextResponse.json({ message: 'cids must be non-empty array' }, { status: 400 }))
+    }
+    if (parsedCids.length > MAX_CIDS) {
+      return setCors(NextResponse.json({ message: `Too many CIDs (max ${MAX_CIDS})` }, { status: 400 }))
+    }
+
+    // Initialize PublicKeys
     const fhe = getFHEcpkInfo()
     const domain_hash = calcDomainHash(fhe)
-
-     // Hash calculation
-    const inputs_commit = calcInputsCommit(parsedInputs)
-    const enc_params_hash = calcEncParamsHash(parsedEncParams)
-    const policy_hash = calcPolicyHash(parsedPolicyCtx)
-     // nonce: use user-provided or generate server-side
-    const nonce_hex = nonce && /^0x[0-9a-fA-F]{64}$/.test(nonce) ? nonce : sha256Hex(crypto.randomBytes(32)).slice(0, 66)
-     // Final commitment
-    const commitment = calcCommitment(inputs_commit, ir_digest, enc_params_hash, policy_hash, domain_hash, nonce_hex)
-
-    // PDA & ix
     const gatekeeperProgram = new PublicKey(fhe.domain.gatekeeper_program)
     const submitter = new PublicKey(account)
+    const batchPubkey = new PublicKey(batch)
+    const cidHandles = parsedCids.map(cid => new PublicKey(cid))
+
+    // Calculate hashes
+    const cid_set_id = calcCidSetId(parsedCids)
+    const policy_hash = calcPolicyHash(parsedPolicyCtx)
+    const nonce_hex = nonce && /^0x[0-9a-fA-F]{64}$/.test(nonce) 
+      ? nonce 
+      : sha256Hex(crypto.randomBytes(32)).slice(0, 66)
+    const commitment = calcCommitment(cid_set_id, ir_digest, policy_hash, domain_hash, nonce_hex)
+
+    // Derive PDAs
     const configPda = deriveConfigPda(gatekeeperProgram)
     const jobPda = deriveJobPda(gatekeeperProgram, commitment, submitter)
 
-    const ix = buildSubmitJobIx({
+    // Build submit_job instruction
+    const submitIx = buildSubmitJobInstruction({
       gatekeeperProgram,
       submitter,
+      batch: batchPubkey,
+      cidSetIdHex: cid_set_id,
       commitmentHex: commitment,
       irDigestHex: ir_digest,
-      encParamsHashHex: enc_params_hash,
       policyHashHex: policy_hash,
       configPda,
       jobPda,
+      cidHandles,
+      provenance: provenanceValue,
     })
 
-     // Action Identity memo (for verification; optional)
-    const memoProg = new PublicKey('MemoSq4gqABAXKb96qnH8TysKcWfC85B2q2')
-    const identity = 'ActionIdentity11111111111111111111111111111111'
+    // Optional: Add action identity memo for tracking
     const reference = crypto.randomBytes(32).toString('base64url')
-    const memoStr = `solana-action:${identity}:${reference}:<signature>`
-    const memoIx = new TransactionInstruction({ programId: memoProg, keys: [], data: Buffer.from(memoStr, 'utf8') })
+    const memoStr = `solana-action:gatekeeper-submit:${reference}`
+    const memoIx = new TransactionInstruction({ 
+      programId: MEMO_PROGRAM_ID, 
+      keys: [], 
+      data: Buffer.from(memoStr, 'utf8') 
+    })
 
-     // Transaction (feePayer/recentBlockhash set by wallet — Actions spec)
-    const tx = new Transaction().add(ix, memoIx)
+    // Build transaction with recent blockhash
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
+    const tx = new Transaction()
     tx.feePayer = submitter
-    const base64Tx = Buffer.from(tx.serialize({ requireAllSignatures: false })).toString('base64')
+    tx.recentBlockhash = blockhash
+    tx.lastValidBlockHeight = lastValidBlockHeight
+    tx.add(submitIx, memoIx)
 
-     // Include all preimages/hashes for user verification
-    return setCors(
-      NextResponse.json({
-        transaction: base64Tx,
-        message: 'Submit confidential compute',
-        verification: {
-          algo: 'sha256',
-          domain_hash,
-          preimage: {
-            inputs: parsedInputs,        // [{cid}]
-            ir_digest,
-            enc_params: parsedEncParams, // canonical-JSON 기준
-            policy_ctx: parsedPolicyCtx, // canonical-JSON 기준
-            nonce: nonce_hex,
-          },
-          hashes: {
-            inputs_commit,
-            enc_params_hash,
-            policy_hash,
-            commitment,
-          },
-           // Account/argument order specified (client can re-verify serialization)
-          accountsOrder: ['config', 'job', 'submitter', 'system_program'],
-          argsOrder: ['commitment', 'ir_digest', 'enc_params_hash', 'policy_hash'],
-          pda: { config: configPda.toBase58(), job: jobPda.toBase58() },
-          programId: gatekeeperProgram.toBase58(),
+    const serializedTx = tx.serialize({
+      requireAllSignatures: false,
+      verifySignatures: false,
+    })
+
+    return setCors(NextResponse.json({
+      transaction: Buffer.from(serializedTx).toString('base64'),
+      message: `Submit confidential job with ${parsedCids.length} CID reference(s)`,
+      verification: {
+        algo: 'sha256',
+        domain_hash,
+        preimage: {
+          cids: parsedCids,
+          batch,
+          ir_digest,
+          policy_ctx: parsedPolicyCtx,
+          provenance: provenanceValue,
+          nonce: nonce_hex,
         },
-      })
-    )
+        hashes: { cid_set_id, policy_hash, commitment },
+        accountsOrder: ['config', 'job', 'batch', 'submitter', 'system_program', '...cid_handles'],
+        argsOrder: ['batch', 'cid_set_id', 'commitment', 'ir_digest', 'policy_hash', 'provenance'],
+        pda: { 
+          config: configPda.toBase58(), 
+          job: jobPda.toBase58() 
+        },
+        programId: gatekeeperProgram.toBase58(),
+        remaining_accounts: cidHandles.map(c => c.toBase58()),
+      },
+    }))
   } catch (e: unknown) {
-    console.error(e)
-    return setCors(NextResponse.json({ message: 'Internal server error' }, { status: 500 }))
+    console.error('Submit job error:', e)
+    return setCors(NextResponse.json({ 
+      message: e instanceof Error ? e.message : 'Internal server error',
+      details: e instanceof Error ? e.stack : String(e)
+    }, { status: 500 }))
   }
 }

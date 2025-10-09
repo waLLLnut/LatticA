@@ -1,35 +1,34 @@
 use anchor_lang::prelude::*;
+use sha2::{Digest, Sha256};
 
 declare_id!("GateF9qDULEJRgt6m1prkmUWrEXGVhDzYCgCJtGtnwu9");
 
-const MAX_CIDS: usize = 16; // Maximum CIDs per job
+const MAX_CIDS: usize = 16;
 
 #[program]
 pub mod lattica_gatekeeper {
     use super::*;
 
-    /// Initialize global config (authority + challenge window)
+    /// Initialize global configuration
     pub fn initialize_config(
         ctx: Context<InitializeConfig>,
         challenge_window_slots: u64,
     ) -> Result<()> {
-        let c = &mut ctx.accounts.config;
-        c.authority = ctx.accounts.authority.key();
-        c.challenge_window_slots = challenge_window_slots;
-        c.bump = ctx.bumps.config;
+        let config = &mut ctx.accounts.config;
+        config.authority = ctx.accounts.authority.key();
+        config.challenge_window_slots = challenge_window_slots;
+        config.bump = ctx.bumps.config;
         Ok(())
     }
 
-    /// Register a new CID handle (Content Identifier for confidential data)
-    /// CID is deterministically derived from: ciphertext_hash + policy_hash + user
-    /// Same data + same policy + same user = same CID (trustless, reproducible)
+    /// Register CID handle (Content Identifier)
+    /// Deterministically derived: sha256(ciphertext_hash || policy_hash || owner)
     pub fn register_cid(
         ctx: Context<RegisterCid>,
         ciphertext_hash: [u8; 32],
         policy_hash: [u8; 32],
     ) -> Result<()> {
         let cid = &mut ctx.accounts.cid;
-        
         cid.ciphertext_hash = ciphertext_hash;
         cid.policy_hash = policy_hash;
         cid.owner = ctx.accounts.owner.key();
@@ -38,13 +37,13 @@ pub mod lattica_gatekeeper {
         Ok(())
     }
 
-    /// Submit a new confidential job with multiple CID references
-    /// CID handles are passed via remaining_accounts and validated
+    /// Submit confidential job with validated CID references
+    /// CIDs passed via remaining_accounts, validated on-chain
     pub fn submit_job<'info>(
         ctx: Context<'_, '_, 'info, 'info, SubmitJob<'info>>,
         batch: Pubkey,
-        cid_set_id: [u8; 32],      // Set identifier (e.g., Merkle root / hash)
-        commitment: [u8; 32],      // H(cid_set_id || ir_digest || policy_hash || domain_hash || nonce)
+        cid_set_id: [u8; 32],
+        commitment: [u8; 32],
         ir_digest: [u8; 32],
         policy_hash: [u8; 32],
         provenance: u8,
@@ -52,19 +51,26 @@ pub mod lattica_gatekeeper {
         let job = &mut ctx.accounts.job;
         let slot = Clock::get()?.slot;
 
-        // 1) Collect & validate all CidHandle accounts passed as remaining_accounts
+        // Validate CID handles from remaining_accounts
         let mut cid_handles: Vec<Pubkey> = Vec::new();
         for (i, acc) in ctx.remaining_accounts.iter().enumerate() {
             require!(i < MAX_CIDS, ErrorCode::TooManyCids);
-            // Must be owned by this program
             require_keys_eq!(*acc.owner, crate::ID, ErrorCode::BadCidOwner);
-            // Verify it deserializes to CidHandle (shape check)
             let _cid: Account<CidHandle> = Account::try_from(acc)?;
             cid_handles.push(*acc.key);
         }
         require!(!cid_handles.is_empty(), ErrorCode::NoCidProvided);
 
-        // 2) Pin minimal state on-chain (compact)
+        // Verify cid_set_id matches provided CID handles
+        // Formula: sha256(cid_pubkey_1 || cid_pubkey_2 || ...)
+        let mut hasher = Sha256::new();
+        for k in cid_handles.iter() {
+            hasher.update(k.as_ref());
+        }
+        let computed = hasher.finalize();
+        require!(computed[..] == cid_set_id, ErrorCode::CidSetMismatch);
+
+        // Store job data on-chain
         job.batch = batch;
         job.cid_set_id = cid_set_id;
         job.cid_count = cid_handles.len() as u16;
@@ -76,12 +82,12 @@ pub mod lattica_gatekeeper {
         job.submitted_slot = slot;
         job.bump = ctx.bumps.job;
 
-        // 3) Emit full list for indexers/auditors
+        // Emit event for indexers
         emit!(JobSubmitted {
             job: job.key(),
             batch,
             cid_set_id,
-            cid_handles, // Full list visible on-chain via event
+            cid_handles,
             commitment,
             submitter: job.submitter,
             slot,
@@ -90,8 +96,7 @@ pub mod lattica_gatekeeper {
     }
 }
 
-/* ===================== ACCOUNTS ===================== */
-
+// Account validation contexts
 #[derive(Accounts)]
 pub struct InitializeConfig<'info> {
     #[account(init, payer = authority, space = 8 + Config::INIT_SPACE, seeds = [b"config"], bump)]
@@ -117,7 +122,6 @@ pub struct RegisterCid<'info> {
         bump
     )]
     pub cid: Account<'info, CidHandle>,
-    /// The owner of this confidential data
     pub owner: Signer<'info>,
     #[account(mut)]
     pub payer: Signer<'info>,
@@ -142,7 +146,6 @@ pub struct SubmitJob<'info> {
     #[account(mut)]
     pub submitter: Signer<'info>,
     pub system_program: Program<'info, System>,
-    // NOTE: CidHandle accounts are supplied via remaining_accounts
 }
 
 #[derive(Accounts)]
@@ -161,8 +164,7 @@ pub struct PostBatchResult<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/* ===================== STATE ===================== */
-
+// Program state accounts
 #[account]
 #[derive(InitSpace)]
 pub struct Config {
@@ -174,10 +176,10 @@ pub struct Config {
 #[account]
 #[derive(InitSpace)]
 pub struct CidHandle {
-    pub ciphertext_hash: [u8; 32],  // Hash of encrypted data (computed off-chain)
-    pub policy_hash: [u8; 32],      // Hash of FHE policy
-    pub owner: Pubkey,              // Data owner (part of CID derivation)
-    pub registered_at: u64,         // Slot when registered on-chain
+    pub ciphertext_hash: [u8; 32],
+    pub policy_hash: [u8; 32],
+    pub owner: Pubkey,
+    pub registered_at: u64,
     pub bump: u8,
 }
 
@@ -185,9 +187,9 @@ pub struct CidHandle {
 #[derive(InitSpace)]
 pub struct Job {
     pub batch: Pubkey,
-    pub cid_set_id: [u8; 32],   // Compact set id (bound in commitment)
-    pub cid_count: u16,         // How many CIDs in this job (max=MAX_CIDS)
-    pub commitment: [u8; 32],   // H(cid_set_id || ir_digest || policy_hash || domain_hash || nonce)
+    pub cid_set_id: [u8; 32],
+    pub cid_count: u16,
+    pub commitment: [u8; 32],
     pub ir_digest: [u8; 32],
     pub policy_hash: [u8; 32],
     pub provenance: u8,
@@ -208,21 +210,19 @@ pub struct BatchResult {
     pub bump: u8,
 }
 
-/* ===================== EVENTS ===================== */
-
+// Events
 #[event]
 pub struct JobSubmitted {
     pub job: Pubkey,
     pub batch: Pubkey,
     pub cid_set_id: [u8; 32],
-    pub cid_handles: Vec<Pubkey>, // Emitted for transparency (<= MAX_CIDS)
+    pub cid_handles: Vec<Pubkey>,
     pub commitment: [u8; 32],
     pub submitter: Pubkey,
     pub slot: u64,
 }
 
-/* ===================== ERRORS ===================== */
-
+// Error codes
 #[error_code]
 pub enum ErrorCode {
     #[msg("No CID handles provided")]
@@ -231,4 +231,6 @@ pub enum ErrorCode {
     TooManyCids,
     #[msg("CID handle account not owned by this program")]
     BadCidOwner,
+    #[msg("cid_set_id does not match remaining_accounts")]
+    CidSetMismatch,
 }
