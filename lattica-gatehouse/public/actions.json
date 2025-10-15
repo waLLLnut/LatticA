@@ -1,6 +1,11 @@
 {
   "rules": [
     { "pathPattern": "/actions/job/registerCIDs", "apiPath": "/api/actions/job/registerCIDs" },
-    { "pathPattern": "/actions/job/submit", "apiPath": "/api/actions/job/submit" }
+    { "pathPattern": "/actions/job/submit", "apiPath": "/api/actions/job/submit" },
+    { "pathPattern": "/actions/batch/plan", "apiPath": "/api/actions/batch/plan" },
+    { "pathPattern": "/actions/batch/commit", "apiPath": "/api/actions/batch/commit" },
+    { "pathPattern": "/actions/batch/challenge_leaf", "apiPath": "/api/actions/batch/challenge_leaf" },
+    { "pathPattern": "/actions/decrypt/public", "apiPath": "/api/actions/decrypt/public" },
+    { "pathPattern": "/actions/decrypt/user", "apiPath": "/api/actions/decrypt/user" }
   ]
 }
