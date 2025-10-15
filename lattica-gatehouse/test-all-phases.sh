@@ -303,7 +303,6 @@ DECRYPT_PUB_RESP=$(curl -s -X POST "${BASE_URL}/api/actions/decrypt/public" \
   -d "{
     \"account\": \"${WALLET}\",
     \"handle\": \"${HANDLE}\",
-    \"user_session_pubkey\": \"0x1122334411223344112233441122334411223344112233441122334411223344\",
     \"domain_signature\": \"0xffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddccffeeddcc\",
     \"purpose_ctx\": \"public-audit\"
   }")

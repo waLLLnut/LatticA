@@ -210,9 +210,10 @@ sequenceDiagram
     Client->>Solana: Sign & send tx
     Solana->>KMS: RevealRequested event
     KMS->>KMS: Threshold decrypt (verify domain_sig)
-    KMS->>Gatehouse: Sealed shares (encrypted with session key)
-    Gatehouse-->>Client: Sealed payload
-    Note over Client: Decrypt with session private key
+    KMS->>Gatehouse: Partial decryptions
+    Gatehouse->>Gatehouse: Aggregate to plaintext
+    Gatehouse->>Solana: Submit plaintext on-chain
+    Solana-->>Client: Plaintext exposed publicly
 ```
 
 **Endpoints:**
@@ -226,7 +227,6 @@ curl -X POST http://localhost:3000/api/actions/decrypt/public \
   -d '{
     "account": "YOUR_WALLET",
     "handle": "0xaabb...ccdd",
-    "user_session_pubkey": "0x1122...3344",
     "domain_signature": "0x5566...7788"
   }'
 ```
@@ -236,6 +236,20 @@ curl -X POST http://localhost:3000/api/actions/decrypt/public \
 ### Phase 5b: User Decryption
 
 **Client → Gatehouse → KMS → Client**
+
+```mermaid
+sequenceDiagram
+    Client->>Gatehouse: POST /api/actions/decrypt/user
+    Gatehouse-->>Client: Unsigned tx (request_reveal_private)
+    Client->>Solana: Sign & send tx
+    Solana->>KMS: RevealRequested event (with user_session_pubkey)
+    KMS->>KMS: Threshold decrypt (verify ACL)
+    KMS->>KMS: Re-encrypt with user_session_pubkey
+    KMS->>Gatehouse: Sealed shares (encrypted for user)
+    Gatehouse->>Solana: Submit sealed payload on-chain
+    Solana-->>Client: Sealed payload
+    Note over Client: Decrypt with session private key
+```
 
 **Endpoints:**
 - `GET /api/actions/decrypt/user` - User decrypt info

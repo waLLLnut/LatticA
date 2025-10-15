@@ -112,7 +112,6 @@ export async function GET(request: NextRequest) {
         label: 'Request Public Decrypt',
         parameters: [
           { name: 'handle', label: 'Handle (0x...64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
-          { name: 'user_session_pubkey', label: 'User Session Public Key (0x...64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
           { name: 'domain_signature', label: 'Domain Signature (0x...128hex)', required: true, pattern: '^0x[0-9a-fA-F]{128}$' },
           { name: 'purpose_ctx', label: 'Purpose Context (optional)', required: false, type: 'textarea' },
         ],
@@ -121,7 +120,7 @@ export async function GET(request: NextRequest) {
     notes: {
       kms_threshold: 'KMS parties perform threshold decryption (t-of-n)',
       domain_signature: 'Domain signature required for public decrypt',
-      session_key: 'Result sealed with user session key',
+      result: 'Plaintext exposed on-chain (no session key encryption)',
     },
   }))
 }
@@ -129,18 +128,18 @@ export async function GET(request: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { account, handle, user_session_pubkey, domain_signature, purpose_ctx } = body
+    const { account, handle, domain_signature, purpose_ctx } = body
 
     // Validation
-    if (!account || !handle || !user_session_pubkey || !domain_signature) {
+    if (!account || !handle || !domain_signature) {
       return setCors(NextResponse.json({
-        message: 'Missing required fields: account, handle, user_session_pubkey, domain_signature'
+        message: 'Missing required fields: account, handle, domain_signature'
       }, { status: 400 }))
     }
 
-    if (!/^0x[0-9a-fA-F]{64}$/.test(handle) || !/^0x[0-9a-fA-F]{64}$/.test(user_session_pubkey)) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(handle)) {
       return setCors(NextResponse.json({
-        message: 'handle and user_session_pubkey must be 32-byte hex (0x...)'
+        message: 'handle must be 32-byte hex (0x...)'
       }, { status: 400 }))
     }
 
@@ -189,7 +188,6 @@ export async function POST(req: NextRequest) {
       verification: {
         reveal_req_pda: revealReqPda.toBase58(),
         handle,
-        user_session_pubkey,
         domain_signature,
         purpose_ctx: purpose_ctx || null,
         is_public: true,
@@ -197,7 +195,7 @@ export async function POST(req: NextRequest) {
       kms_info: {
         parties: kms_parties,
         quorum,
-        note: 'After transaction confirms, KMS parties will perform threshold decryption',
+        note: 'After transaction confirms, KMS parties will perform threshold decryption and expose plaintext on-chain',
       },
       links: {
         next: {
