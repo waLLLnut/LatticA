@@ -1,0 +1,3 @@
+[submodule "fhe_executor"]
+	path = fhe_executor
+	url = git@github.com:waLLLnut/fhe_executor.git
