@@ -7,6 +7,9 @@ import { useSolana } from '@/components/solana/use-solana'
 import { UiWalletAccount, useWalletUiSigner } from '@wallet-ui/react'
 import { useInvalidateGetBalanceQuery } from './use-invalidate-get-balance-query'
 import { useInvalidateGetSignaturesQuery } from './use-invalidate-get-signatures-query'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('TransferSOL')
 
 export function useTransferSolMutation({ account, address }: { account: UiWalletAccount; address: Address }) {
   const { client } = useSolana()
@@ -35,11 +38,10 @@ export function useTransferSolMutation({ account, address }: { account: UiWallet
         const signatureBytes = await signAndSendTransactionMessageWithSigners(transaction)
         const signature = getBase58Decoder().decode(signatureBytes)
 
-        console.log(signature)
+        log.info('Transaction signature', { signature })
         return signature
       } catch (error: unknown) {
-        console.log('error', `Transaction failed! ${error}`)
-
+        log.error('Transaction failed', error)
         return
       }
     },

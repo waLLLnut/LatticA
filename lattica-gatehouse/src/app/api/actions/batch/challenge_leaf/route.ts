@@ -4,7 +4,10 @@
  * Phase 4: Challenge & Verification
  */
 import { NextRequest, NextResponse } from 'next/server'
+import { createLogger } from '@/lib/logger'
 import crypto from 'crypto'
+
+const log = createLogger('API:ChallengeLeaf')
 
 function setCors(res: NextResponse) {
   res.headers.set('Access-Control-Allow-Origin', '*')
@@ -18,7 +21,21 @@ export async function OPTIONS() {
 }
 
 // In-memory mock store for challenges (production would use database)
-const challenges = new Map<string, any>()
+interface Challenge {
+  commit_id: string
+  leaf_idx: number
+  d_conflict: string
+  merkle_proof: string[]
+  status: string
+  opened_at: string
+  verifiers: string[]
+  attestations?: Array<{ verifier_id: string; digest: string }>
+  accepted_digest?: string
+  new_result_root?: string
+  resolved_at?: string
+}
+
+const challenges = new Map<string, Challenge>()
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
@@ -91,7 +108,7 @@ export async function POST(req: NextRequest) {
 
     // Register challenge
     const challengeKey = `${commit_id}-leaf-${leaf_idx}`
-    const challenge = {
+    const challenge: Challenge = {
       commit_id,
       leaf_idx,
       d_conflict,
@@ -162,7 +179,7 @@ export async function POST(req: NextRequest) {
       note: 'This is a demo resolution. In production, verifiers would run asynchronously.',
     }))
   } catch (e: unknown) {
-    console.error('Challenge leaf error:', e)
+    log.error('Challenge leaf error', e)
     return setCors(NextResponse.json({
       message: e instanceof Error ? e.message : 'Internal server error',
       details: e instanceof Error ? e.stack : String(e)

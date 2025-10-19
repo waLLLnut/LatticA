@@ -10,9 +10,21 @@ import {
   SystemProgram,
   Connection,
 } from '@solana/web3.js'
-import crypto from 'crypto'
-import bs58 from 'bs58'
+import { createLogger } from '@/lib/logger'
+import { cidValidator } from '@/services/validation/cid-validator'
+import { 
+  hex32, 
+  calcCidSetId, 
+  calcPolicyHash, 
+  calcDomainHash, 
+  calcCommitment,
+  generateNonce,
+  isValidHex32 
+} from '@/lib/crypto-utils'
+import { getInstructionDiscriminator } from '@/lib/anchor-utils'
+import type { PolicyContext } from '@/types/ciphertext'
 
+const log = createLogger('API:SubmitJob')
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed')
 const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr')
 const MAX_CIDS = 16
@@ -50,71 +62,12 @@ function getFHEcpkInfo() {
   }
 }
 
-// Hash utilities
-function sha256Hex(buf: Buffer | string): string {
-  const b = typeof buf === 'string' ? Buffer.from(buf) : buf
-  return '0x' + crypto.createHash('sha256').update(b).digest('hex')
-}
-
-function hex32(h0x: string): Buffer {
-  const h = h0x.startsWith('0x') ? h0x.slice(2) : h0x
-  if (h.length !== 64) throw new Error('Expected 32-byte hex string')
-  return Buffer.from(h, 'hex')
-}
-
-function canonicalJson(obj: unknown): string {
-  return JSON.stringify(obj, Object.keys(obj as Record<string, unknown>).sort())
-}
-
-/**
- * Commitment formula (matches on-chain gatekeeper contract):
- *   cid_set_id = sha256(cid_handle_1 || cid_handle_2 || ...)
- *   policy_hash = sha256(canonical_json(policy_ctx))
- *   domain_hash = sha256(chain_id || program || cpk_id || epoch)
- *   commitment = sha256(cid_set_id || ir_digest || policy_hash || domain_hash || nonce)
- */
-function calcCidSetId(cidHandles: string[]): string {
-  const parts = cidHandles.map((b58str) => Buffer.from(bs58.decode(b58str)))
-  const buf = Buffer.allocUnsafe(parts.length * 32)
-  parts.forEach((p, i) => p.copy(buf, i * 32))
-  return sha256Hex(buf)
-}
-
-function calcPolicyHash(policyCtx: unknown): string {
-  return sha256Hex(Buffer.from(canonicalJson(policyCtx), 'utf8'))
-}
-
-function calcDomainHash(fhe: ReturnType<typeof getFHEcpkInfo>): string {
-  return sha256Hex(Buffer.concat([
-    Buffer.from(fhe.domain.chain_id, 'utf8'),
-    Buffer.from(fhe.domain.gatekeeper_program, 'utf8'),
-    Buffer.from(fhe.cpk_id, 'utf8'),
-    Buffer.from(String(fhe.domain.key_epoch), 'utf8'),
-  ]))
-}
-
-function calcCommitment(
-  cidSetId: string,
-  irDigest: string,
-  policyHash: string,
-  domainHash: string,
-  nonceHex32: string,
-): string {
-  return sha256Hex(Buffer.concat([
-    hex32(cidSetId),
-    hex32(irDigest),
-    hex32(policyHash),
-    hex32(domainHash),
-    hex32(nonceHex32),
-  ]))
-}
+// Use crypto-utils instead of local implementations
 
 // Anchor discriminator for submit_job instruction
-const SUBMIT_DISCRIMINATOR = crypto
-  .createHash('sha256')
-  .update('global:submit_job')
-  .digest()
-  .subarray(0, 8)
+// Extracted from IDL (never calculate manually!)
+// @see src/idl/lattica_gatekeeper.json line 455-463
+const SUBMIT_DISCRIMINATOR = getInstructionDiscriminator('submit_job')
 
 function buildSubmitJobInstruction(args: {
   gatekeeperProgram: PublicKey
@@ -172,7 +125,12 @@ function deriveJobPda(programId: PublicKey, commitmentHex: string, submitter: Pu
 
 export async function GET(request: NextRequest) {
   const fhe = getFHEcpkInfo()
-  const domain_hash = calcDomainHash(fhe)
+  const domain_hash = calcDomainHash({
+    chain_id: fhe.domain.chain_id,
+    gatekeeper_program: fhe.domain.gatekeeper_program,
+    cpk_id: fhe.cpk_id,
+    key_epoch: fhe.domain.key_epoch,
+  })
   
   const { searchParams } = new URL(request.url)
   const cidsParam = searchParams.get('cids')
@@ -254,7 +212,7 @@ export async function POST(req: NextRequest) {
     }
 
     const parsedCids: string[] = typeof cids === 'string' ? JSON.parse(cids) : cids
-    const parsedPolicyCtx = typeof policy_ctx === 'string' ? JSON.parse(policy_ctx) : policy_ctx
+    const parsedPolicyCtx: PolicyContext = typeof policy_ctx === 'string' ? JSON.parse(policy_ctx) : policy_ctx
     const provenanceValue = provenance ?? 1
 
     if (!Array.isArray(parsedCids) || parsedCids.length === 0) {
@@ -264,9 +222,56 @@ export async function POST(req: NextRequest) {
       return setCors(NextResponse.json({ message: `Too many CIDs (max ${MAX_CIDS})` }, { status: 400 }))
     }
 
+    // STRICT VALIDATION: Only accept CONFIRMED CIDs
+    const policy_hash = calcPolicyHash(parsedPolicyCtx)
+    
+    // First check: CIDs must exist and be confirmed
+    const validation = cidValidator.validate_cids(parsedCids, {
+      require_confirmed: true,    // Must be confirmed on-chain
+      allow_pending: false,        // No pending allowed
+      check_expiry: true,
+      check_owner: false,
+    })
+
+    if (!validation.all_valid) {
+      log.error('CID validation failed', { 
+        invalid_count: validation.invalid_count 
+      })
+      return setCors(NextResponse.json({
+        message: 'CID validation failed: All CIDs must be confirmed on-chain',
+        validation: {
+          all_valid: false,
+          invalid_count: validation.invalid_count,
+          invalid_cids: validation.invalid_cids,
+          details: validation.results.filter(r => !r.valid).map(r => ({
+            cid: r.cid_pda,
+            reason: r.reason,
+            status: r.status,
+          })),
+        },
+        hint: 'Wait for CIDRegistered events before submitting jobs. Check pending CIDs with GET /api/actions/job/registerCIDs'
+      }, { status: 400 }))
+    }
+
+    // Second check: Policy compatibility
+    const jobValidation = cidValidator.validate_for_job_submission(parsedCids, policy_hash)
+    if (!jobValidation.policy_compatible) {
+      log.error('Policy incompatibility detected')
+      return setCors(NextResponse.json({
+        message: 'CIDs have incompatible policies (different policy_hash values)',
+      }, { status: 400 }))
+    }
+
+    log.info('All CIDs confirmed and valid', { cids: parsedCids.length })
+
     // Initialize PublicKeys
     const fhe = getFHEcpkInfo()
-    const domain_hash = calcDomainHash(fhe)
+    const domain_hash = calcDomainHash({
+      chain_id: fhe.domain.chain_id,
+      gatekeeper_program: fhe.domain.gatekeeper_program,
+      cpk_id: fhe.cpk_id,
+      key_epoch: fhe.domain.key_epoch,
+    })
     const gatekeeperProgram = new PublicKey(fhe.domain.gatekeeper_program)
     const submitter = new PublicKey(account)
     const batchPubkey = new PublicKey(batch)
@@ -274,10 +279,9 @@ export async function POST(req: NextRequest) {
 
     // Calculate hashes
     const cid_set_id = calcCidSetId(parsedCids)
-    const policy_hash = calcPolicyHash(parsedPolicyCtx)
-    const nonce_hex = nonce && /^0x[0-9a-fA-F]{64}$/.test(nonce) 
+    const nonce_hex = nonce && isValidHex32(nonce) 
       ? nonce 
-      : sha256Hex(crypto.randomBytes(32)).slice(0, 66)
+      : generateNonce()
     const commitment = calcCommitment(cid_set_id, ir_digest, policy_hash, domain_hash, nonce_hex)
 
     // Derive PDAs
@@ -300,7 +304,7 @@ export async function POST(req: NextRequest) {
     })
 
     // Optional: Add action identity memo for tracking
-    const reference = crypto.randomBytes(32).toString('base64url')
+    const reference = generateNonce()
     const memoStr = `solana-action:gatekeeper-submit:${reference}`
     const memoIx = new TransactionInstruction({ 
       programId: MEMO_PROGRAM_ID, 
@@ -321,9 +325,27 @@ export async function POST(req: NextRequest) {
       verifySignatures: false,
     })
 
+    log.info('Transaction built successfully', { 
+      job_pda: jobPda.toBase58().slice(0, 8) + '...' 
+    })
+
     return setCors(NextResponse.json({
       transaction: Buffer.from(serializedTx).toString('base64'),
-      message: `Submit confidential job with ${parsedCids.length} CID reference(s)`,
+      message: `Submit confidential job with ${parsedCids.length} confirmed CID reference(s)`,
+      validation: {
+        all_cids_confirmed: true,
+        cids_checked: parsedCids.length,
+        policy_compatible: true,
+      },
+      workflow: {
+        current: 'Transaction created (NOT queued yet)',
+        next_steps: [
+          '1. Sign and send this transaction',
+          '2. Wait for on-chain confirmation',
+          '3. EventListener will catch JobSubmitted event',
+          '4. Job will be enqueued for execution ONLY after on-chain confirmation'
+        ]
+      },
       verification: {
         algo: 'sha256',
         domain_hash,
@@ -347,7 +369,7 @@ export async function POST(req: NextRequest) {
       },
     }))
   } catch (e: unknown) {
-    console.error('Submit job error:', e)
+    log.error('Submit job error', e)
     return setCors(NextResponse.json({ 
       message: e instanceof Error ? e.message : 'Internal server error',
       details: e instanceof Error ? e.stack : String(e)

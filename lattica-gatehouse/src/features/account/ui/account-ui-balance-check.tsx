@@ -4,6 +4,9 @@ import { Button } from '@/components/ui/button'
 import { useSolana } from '@/components/solana/use-solana'
 import { useRequestAirdropMutation } from '../data-access/use-request-airdrop-mutation'
 import { useGetBalanceQuery } from '../data-access/use-get-balance-query'
+import { createLogger } from '@/lib/logger'
+
+const log = createLogger('BalanceCheck')
 
 export function AccountUiBalanceCheck({ address }: { address: Address }) {
   const { cluster } = useSolana()
@@ -17,7 +20,7 @@ export function AccountUiBalanceCheck({ address }: { address: Address }) {
     return (
       <AppAlert
         action={
-          <Button variant="outline" onClick={() => mutation.mutateAsync(1).catch((err) => console.log(err))}>
+          <Button variant="outline" onClick={() => mutation.mutateAsync(1).catch((err) => log.error('Airdrop request failed', err))}>
             Request Airdrop
           </Button>
         }

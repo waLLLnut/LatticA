@@ -4,7 +4,10 @@
  * Phase 3: Batch Execution (Optimistic)
  */
 import { NextRequest, NextResponse } from 'next/server'
+import { createLogger } from '@/lib/logger'
 import crypto from 'crypto'
+
+const log = createLogger('API:BatchPlan')
 
 function setCors(res: NextResponse) {
   res.headers.set('Access-Control-Allow-Origin', '*')
@@ -194,7 +197,7 @@ export async function GET(request: NextRequest) {
       note: 'This is a demo DAG. In production, query actual jobs from batch window.',
     }))
   } catch (e: unknown) {
-    console.error('Batch plan error:', e)
+    log.error('Batch plan error', e)
     return setCors(NextResponse.json({
       message: e instanceof Error ? e.message : 'Internal server error',
       details: e instanceof Error ? e.stack : String(e)

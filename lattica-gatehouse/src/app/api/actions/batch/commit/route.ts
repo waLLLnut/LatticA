@@ -11,9 +11,11 @@ import {
   SystemProgram,
   Connection,
 } from '@solana/web3.js'
-import crypto from 'crypto'
 import BN from 'bn.js'
+import { getInstructionDiscriminator } from '@/lib/anchor-utils'
+import { createLogger } from '@/lib/logger'
 
+const log = createLogger('API:BatchCommit')
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed')
 
 function setCors(res: NextResponse) {
@@ -46,11 +48,9 @@ function hex32(h0x: string): Buffer {
 }
 
 // Anchor discriminator for commit_batch instruction
-const COMMIT_BATCH_DISCRIMINATOR = crypto
-  .createHash('sha256')
-  .update('global:commit_batch')
-  .digest()
-  .subarray(0, 8)
+// Extracted from IDL (never calculate manually!)
+// @see src/idl/lattica_gatekeeper.json line 11-24
+const COMMIT_BATCH_DISCRIMINATOR = getInstructionDiscriminator('commit_batch')
 
 function deriveBatchPda(programId: PublicKey, windowStartSlot: number): PublicKey {
   const slotBytes = Buffer.alloc(8)
@@ -207,7 +207,7 @@ export async function POST(req: NextRequest) {
       },
     }))
   } catch (e: unknown) {
-    console.error('Batch commit error:', e)
+    log.error('Batch commit error', e)
     return setCors(NextResponse.json({
       message: e instanceof Error ? e.message : 'Internal server error',
       details: e instanceof Error ? e.stack : String(e)

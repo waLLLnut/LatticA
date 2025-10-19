@@ -1,0 +1,444 @@
+/**
+ * Gatekeeper Event Listener
+ * 
+ * Subscribes to on-chain events from the Gatekeeper program via WebSocket
+ * and processes them to update internal state and job queue.
+ * 
+ * Key responsibilities:
+ * - Listen to program logs in real-time
+ * - Parse and validate Anchor events
+ * - Move CIDs from pending → confirmed storage
+ * - Enqueue jobs for execution (only after on-chain confirmation)
+ * 
+ * @see lattica-gatekeeper/programs/lattica-gatekeeper/src/lib.rs
+ */
+
+import { Connection, PublicKey, Logs } from '@solana/web3.js'
+import { getConnectionManager } from './connection-manager'
+import { logParser } from './log-parser'
+import { ciphertextStore } from '../storage/ciphertext-store'
+import { pendingCiphertextStore } from '../storage/pending-store'
+import { registrationLog } from '../storage/registration-log'
+import { jobQueue } from '../queue/job-queue'
+import { createLogger } from '@/lib/logger'
+import type { 
+  SolanaEvent, 
+  CidHandleRegisteredEvent, 
+  JobSubmittedEvent, 
+  BatchPostedEvent,
+  BatchFinalizedEvent,
+  RevealRequestedEvent,
+  EventListenerState,
+  EventProcessingResult 
+} from '@/types/events'
+
+const log = createLogger('EventListener')
+
+/**
+ * Gatekeeper Event Listener
+ * Singleton service that manages WebSocket subscription to Solana program events
+ */
+export class GatekeeperEventListener {
+  private static instance: GatekeeperEventListener
+  private connection: Connection
+  private programId: PublicKey
+  private subscriptionId: number | null = null
+  private state: EventListenerState
+  private processedTxSignatures: Set<string>
+
+  private constructor() {
+    const manager = getConnectionManager()
+    this.connection = manager.getConnection()
+    this.programId = manager.getProgramId()
+    this.processedTxSignatures = new Set()
+    this.state = {
+      is_running: false,
+      last_processed_slot: 0,
+      total_events_processed: 0,
+      errors_count: 0,
+    }
+  }
+
+  static getInstance(): GatekeeperEventListener {
+    if (!GatekeeperEventListener.instance) {
+      GatekeeperEventListener.instance = new GatekeeperEventListener()
+    }
+    return GatekeeperEventListener.instance
+  }
+
+  /**
+   * Start listening to on-chain events
+   * 
+   * Subscribes to program logs and processes them in real-time.
+   * Safe to call multiple times (idempotent).
+   */
+  async start(): Promise<void> {
+    if (this.state.is_running) {
+      log.warn('Already running')
+      return
+    }
+
+    log.info('Starting event listener', {
+      program: this.programId.toBase58(),
+    })
+
+    try {
+      this.subscriptionId = this.connection.onLogs(
+        this.programId,
+        (logs: Logs, ctx) => {
+          this.handleLogs(logs, ctx.slot).catch(error => {
+            log.error('Error handling logs', error, {
+              tx: logs.signature,
+              slot: ctx.slot,
+            })
+            this.state.errors_count++
+          })
+        },
+        'confirmed'
+      )
+
+      this.state.is_running = true
+      this.state.connected_at = Math.floor(Date.now() / 1000)
+      
+      log.info('Event listener started successfully', {
+        subscription_id: this.subscriptionId,
+      })
+    } catch (error) {
+      log.error('Failed to start event listener', error)
+      throw error
+    }
+  }
+
+  /**
+   * Stop listening to events
+   * 
+   * Unsubscribes from program logs and cleans up resources.
+   */
+  async stop(): Promise<void> {
+    if (!this.state.is_running) {
+      log.warn('Not running')
+      return
+    }
+
+    if (this.subscriptionId !== null) {
+      await this.connection.removeOnLogsListener(this.subscriptionId)
+      this.subscriptionId = null
+    }
+
+    this.state.is_running = false
+    log.info('Event listener stopped')
+  }
+
+  /**
+   * Get current listener state
+   */
+  getState(): EventListenerState {
+    return { ...this.state }
+  }
+
+  /**
+   * Handle logs from a transaction
+   * 
+   * @param logs - Transaction logs from Solana
+   * @param slot - Slot number when tx was processed
+   */
+  private async handleLogs(logs: Logs, slot: number): Promise<void> {
+    // Prevent duplicate processing
+    if (this.processedTxSignatures.has(logs.signature)) {
+      return
+    }
+    this.processedTxSignatures.add(logs.signature)
+
+    // Cleanup old signatures (keep last 1000)
+    if (this.processedTxSignatures.size > 1000) {
+      const toDelete = Array.from(this.processedTxSignatures).slice(0, 100)
+      toDelete.forEach(sig => this.processedTxSignatures.delete(sig))
+    }
+
+    // Get block time
+    let blockTime: number
+    try {
+      const blockTimeResult = await this.connection.getBlockTime(slot)
+      blockTime = blockTimeResult || Math.floor(Date.now() / 1000)
+    } catch (error) {
+      log.warn('Failed to get block time, using current time', {
+        slot,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      blockTime = Math.floor(Date.now() / 1000)
+    }
+
+    // Parse events from logs
+    const events = logParser.parseEvents({
+      program: this.programId.toBase58(),
+      logs: logs.logs,
+      slot,
+      signature: logs.signature,
+      blockTime,
+    })
+
+    if (events.length === 0) return
+
+    log.info(`Received ${events.length} event(s)`, {
+      tx: logs.signature.slice(0, 8) + '...',
+      slot,
+    })
+
+    // Process each event
+    for (const event of events) {
+      const result = await this.processEvent(event)
+      if (result.success) {
+        this.state.total_events_processed++
+        this.state.last_processed_slot = Math.max(this.state.last_processed_slot, slot)
+        this.state.last_event_at = Math.floor(Date.now() / 1000)
+      } else {
+        this.state.errors_count++
+        log.error('Event processing failed', new Error(result.error), {
+          event_type: result.event_type,
+          tx: result.tx_signature,
+        })
+      }
+    }
+  }
+
+  /**
+   * Process a single event
+   * 
+   * Routes the event to the appropriate handler based on event type.
+   * 
+   * @param event - Parsed Solana event
+   * @returns Processing result with success status
+   */
+  private async processEvent(event: SolanaEvent): Promise<EventProcessingResult> {
+    const result: EventProcessingResult = {
+      success: false,
+      event_type: event.event_type,
+      tx_signature: event.tx_signature,
+      processed_at: Math.floor(Date.now() / 1000),
+    }
+
+    try {
+      switch (event.event_type) {
+        case 'CidHandleRegistered':
+          await this.handleCidHandleRegistered(event)
+          result.success = true
+          break
+
+        case 'JobSubmitted':
+          await this.handleJobSubmitted(event)
+          result.success = true
+          break
+
+        case 'BatchPosted':
+          await this.handleBatchPosted(event)
+          result.success = true
+          break
+
+        case 'BatchFinalized':
+          await this.handleBatchFinalized(event)
+          result.success = true
+          break
+
+        case 'RevealRequested':
+          await this.handleRevealRequested(event)
+          result.success = true
+          break
+
+        default:
+          result.error = `Unknown event type`
+          const _exhaustiveCheck: never = event
+          return _exhaustiveCheck
+      }
+    } catch (error) {
+      result.error = error instanceof Error ? error.message : String(error)
+    }
+
+    return result
+  }
+
+  /**
+   * Handle CidHandleRegistered event
+   * 
+   * Workflow:
+   * 1. Verify CID account exists on-chain
+   * 2. Retrieve pending ciphertext data
+   * 3. Move from PendingStore → CiphertextStore (confirmed)
+   * 4. Update RegistrationLog status
+   * 
+   * @param event - CidHandleRegistered event data
+   */
+  private async handleCidHandleRegistered(event: CidHandleRegisteredEvent): Promise<void> {
+    log.info('Processing CidHandleRegistered', {
+      cid: event.cid.slice(0, 8) + '...',
+      owner: event.owner.slice(0, 8) + '...',
+    })
+
+    // 1. Verify account exists on-chain
+    try {
+      const accountInfo = await this.connection.getAccountInfo(new PublicKey(event.cid))
+      if (!accountInfo) {
+        throw new Error(`CID account not found on-chain: ${event.cid}`)
+      }
+      log.debug('CID account verified on-chain', { cid: event.cid })
+    } catch (error) {
+      log.error('On-chain verification failed', error, { cid: event.cid })
+      throw error
+    }
+
+    // 2. Get pending data
+    const pending = pendingCiphertextStore.get(event.cid)
+    if (!pending) {
+      log.warn('No pending data found for CID, skipping', {
+        cid: event.cid,
+        note: 'This is expected if server was restarted or CID was registered before listener started',
+      })
+      return
+    }
+
+    // 3. Move from pending to confirmed store
+    try {
+      ciphertextStore.store_ciphertext(
+        pending.cid_pda,
+        pending.ciphertext,
+        pending.ciphertext_hash,
+        pending.enc_params,
+        pending.policy_ctx,
+        pending.policy_hash,
+        pending.owner,
+        pending.storage_ref,
+        pending.provenance,
+      )
+
+      // Update verification status
+      ciphertextStore.update_verification(
+        event.cid,
+        'confirmed',
+        event.tx_signature,
+        event.slot
+      )
+
+      // Update registration log
+      registrationLog.update_entry_status(
+        event.cid,
+        'confirmed',
+        event.tx_signature
+      )
+
+      // Remove from pending
+      pendingCiphertextStore.remove(event.cid)
+
+      log.info('CID confirmed and moved to storage', {
+        cid: event.cid.slice(0, 8) + '...',
+        slot: event.slot,
+      })
+    } catch (error) {
+      log.error('Failed to confirm CID', error, { cid: event.cid })
+      throw error
+    }
+  }
+
+  /**
+   * Handle JobSubmitted event
+   * 
+   * Workflow:
+   * 1. Verify job account exists on-chain
+   * 2. Validate all CID handles are confirmed
+   * 3. Enqueue job for execution
+   * 
+   * @param event - JobSubmitted event data
+   */
+  private async handleJobSubmitted(event: JobSubmittedEvent): Promise<void> {
+    log.info('Processing JobSubmitted', {
+      job: event.job.slice(0, 8) + '...',
+      batch: event.batch.slice(0, 8) + '...',
+      cid_count: event.cid_handles.length,
+    })
+
+    // 1. Verify job account exists on-chain
+    try {
+      const accountInfo = await this.connection.getAccountInfo(new PublicKey(event.job))
+      if (!accountInfo) {
+        throw new Error(`Job account not found on-chain: ${event.job}`)
+      }
+      log.debug('Job account verified on-chain', { job: event.job })
+    } catch (error) {
+      log.error('On-chain verification failed', error, { job: event.job })
+      throw error
+    }
+
+    // 2. TODO: Validate CID handles are confirmed
+    // Currently skipped as it requires fetching and parsing multiple accounts
+    // Will implement after adding batch account data fetching
+
+    // 3. Enqueue job for execution
+    try {
+      jobQueue.enqueue(event)
+      log.info('Job enqueued for execution', {
+        job: event.job.slice(0, 8) + '...',
+        cid_count: event.cid_handles.length,
+        slot: event.slot,
+      })
+    } catch (error) {
+      log.error('Failed to enqueue job', error, { job: event.job })
+      throw error
+    }
+  }
+
+  /**
+   * Handle BatchPosted event
+   * 
+   * Logs the event for monitoring. Batch execution tracking will be
+   * implemented when challenge/verification logic is added.
+   * 
+   * @param event - BatchPosted event data
+   */
+  private async handleBatchPosted(event: BatchPostedEvent): Promise<void> {
+    log.info('BatchPosted event received', {
+      batch: event.batch.slice(0, 8) + '...',
+      window_start: event.window_start_slot,
+      window_end: event.window_end_slot,
+      processed_until: event.processed_until_slot,
+    })
+    
+    // TODO: Track batch results for challenge/verification
+  }
+
+  /**
+   * Handle BatchFinalized event
+   * 
+   * Logs the event for monitoring. Will be used to trigger job result
+   * publication and cleanup once finalization logic is implemented.
+   * 
+   * @param event - BatchFinalized event data
+   */
+  private async handleBatchFinalized(event: BatchFinalizedEvent): Promise<void> {
+    log.info('BatchFinalized event received', {
+      batch: event.batch.slice(0, 8) + '...',
+      window_start: event.window_start_slot,
+      finalized_slot: event.finalized_slot,
+    })
+    
+    // TODO: Publish finalized results and cleanup
+  }
+
+  /**
+   * Handle RevealRequested event
+   * 
+   * Logs the event for monitoring. Decrypt workflow (KMS coordination)
+   * will be implemented separately.
+   * 
+   * @param event - RevealRequested event data
+   */
+  private async handleRevealRequested(event: RevealRequestedEvent): Promise<void> {
+    log.info('RevealRequested event received', {
+      handle: event.handle.slice(0, 16) + '...',
+      requester: event.requester.slice(0, 8) + '...',
+      is_public: event.is_public,
+    })
+    
+    // TODO: Coordinate with KMS for threshold decryption
+  }
+}
+
+// Export singleton getter
+export const getEventListener = () => GatekeeperEventListener.getInstance()

@@ -11,8 +11,10 @@ import {
   SystemProgram,
   Connection,
 } from '@solana/web3.js'
-import crypto from 'crypto'
+import { getInstructionDiscriminator } from '@/lib/anchor-utils'
+import { createLogger } from '@/lib/logger'
 
+const log = createLogger('API:PublicDecrypt')
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed')
 
 function setCors(res: NextResponse) {
@@ -50,11 +52,9 @@ function hex64(h0x: string): Buffer {
 }
 
 // Anchor discriminator for request_reveal_public instruction
-const REQUEST_REVEAL_PUBLIC_DISCRIMINATOR = crypto
-  .createHash('sha256')
-  .update('global:request_reveal_public')
-  .digest()
-  .subarray(0, 8)
+// Extracted from IDL (never calculate manually!)
+// @see src/idl/lattica_gatekeeper.json line 376-389
+const REQUEST_REVEAL_PUBLIC_DISCRIMINATOR = getInstructionDiscriminator('request_reveal_public')
 
 function deriveRevealReqPda(programId: PublicKey, handle: string): PublicKey {
   return PublicKey.findProgramAddressSync(
@@ -205,7 +205,7 @@ export async function POST(req: NextRequest) {
       },
     }))
   } catch (e: unknown) {
-    console.error('Public decrypt error:', e)
+    log.error('Public decrypt error', e)
     return setCors(NextResponse.json({
       message: e instanceof Error ? e.message : 'Internal server error',
       details: e instanceof Error ? e.stack : String(e)
