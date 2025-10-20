@@ -126,6 +126,15 @@ class JobQueue {
   }
 
   /**
+   * Get executing jobs (currently being processed)
+   */
+  get_executing_jobs(): QueuedJob[] {
+    return Array.from(this.jobs.values())
+      .filter(job => job.status === 'executing')
+      .sort((a, b) => a.slot - b.slot)
+  }
+
+  /**
    * Update job status
    */
   update_job_status(
