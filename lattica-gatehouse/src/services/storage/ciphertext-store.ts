@@ -25,8 +25,11 @@ import { DEFAULT_STORAGE_CONFIG, StoreStats } from './types'
 
 const log = createLogger('CiphertextStore')
 
+declare global {
+  var __ciphertextStore: CiphertextStore | undefined
+}
+
 class CiphertextStore {
-  private static instance: CiphertextStore
   private store: Map<string, StoredCiphertext>
   private cleanupTimer?: NodeJS.Timeout
 
@@ -36,12 +39,11 @@ class CiphertextStore {
   }
 
   static getInstance(): CiphertextStore {
-    if (!CiphertextStore.instance) {
-      CiphertextStore.instance = new CiphertextStore()
+    if (!globalThis.__ciphertextStore) {
+      globalThis.__ciphertextStore = new CiphertextStore()
     }
-    return CiphertextStore.instance
+    return globalThis.__ciphertextStore
   }
-
   /**
    * Store a new ciphertext
    * @throws Error if store is full or CID already exists

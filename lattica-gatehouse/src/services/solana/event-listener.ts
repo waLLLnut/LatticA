@@ -34,36 +34,46 @@ import type {
 
 const log = createLogger('EventListener')
 
+// Declare global type for TypeScript
+declare global {
+  var __eventListener: GatekeeperEventListener | undefined
+}
+
 /**
  * Gatekeeper Event Listener
  * Singleton service that manages WebSocket subscription to Solana program events
+ *
+ * Uses globalThis to ensure singleton persistence across Next.js hot reloads
  */
 export class GatekeeperEventListener {
-  private static instance: GatekeeperEventListener
   private connection: Connection
   private programId: PublicKey
   private subscriptionId: number | null = null
   private state: EventListenerState
   private processedTxSignatures: Set<string>
+  private processedJobPDAs: Set<string>  // Deduplicate by job PDA
 
   private constructor() {
     const manager = getConnectionManager()
     this.connection = manager.getConnection()
     this.programId = manager.getProgramId()
     this.processedTxSignatures = new Set()
+    this.processedJobPDAs = new Set()
     this.state = {
       is_running: false,
       last_processed_slot: 0,
       total_events_processed: 0,
       errors_count: 0,
     }
+    log.debug('GatekeeperEventListener instance created')
   }
 
   static getInstance(): GatekeeperEventListener {
-    if (!GatekeeperEventListener.instance) {
-      GatekeeperEventListener.instance = new GatekeeperEventListener()
+    // Use globalThis to persist across hot reloads
+    if (!globalThis.__eventListener) {
+      globalThis.__eventListener = new GatekeeperEventListener()
     }
-    return GatekeeperEventListener.instance
+    return globalThis.__eventListener
   }
 
   /**
@@ -258,13 +268,13 @@ export class GatekeeperEventListener {
 
   /**
    * Handle CidHandleRegistered event
-   * 
+   *
    * Workflow:
-   * 1. Verify CID account exists on-chain
+   * 1. Verify CID account exists on-chain (with retry)
    * 2. Retrieve pending ciphertext data
    * 3. Move from PendingStore → CiphertextStore (confirmed)
    * 4. Update RegistrationLog status
-   * 
+   *
    * @param event - CidHandleRegistered event data
    */
   private async handleCidHandleRegistered(event: CidHandleRegisteredEvent): Promise<void> {
@@ -273,15 +283,11 @@ export class GatekeeperEventListener {
       owner: event.owner.slice(0, 8) + '...',
     })
 
-    // 1. Verify account exists on-chain
+    // 1. Verify account exists on-chain with retry
     try {
-      const accountInfo = await this.connection.getAccountInfo(new PublicKey(event.cid))
-      if (!accountInfo) {
-        throw new Error(`CID account not found on-chain: ${event.cid}`)
-      }
-      log.debug('CID account verified on-chain', { cid: event.cid })
+      await this.verifyCidAccountWithRetry(event.cid)
     } catch (error) {
-      log.error('On-chain verification failed', error, { cid: event.cid })
+      log.error('CID account verification failed after retries', error, { cid: event.cid })
       throw error
     }
 
@@ -380,17 +386,28 @@ export class GatekeeperEventListener {
       job: event.job.slice(0, 8) + '...',
       batch: event.batch.slice(0, 8) + '...',
       cid_count: event.cid_handles.length,
+      slot: event.slot,
+      tx: event.tx_signature.slice(0, 8) + '...',
     })
 
-    // 1. Verify job account exists on-chain
+    // Deduplicate by job PDA (prevent duplicate processing of same job)
+    if (this.processedJobPDAs.has(event.job)) {
+      log.debug('Job already processed, skipping', { job: event.job })
+      return
+    }
+    this.processedJobPDAs.add(event.job)
+
+    // Cleanup old job PDAs (keep last 1000)
+    if (this.processedJobPDAs.size > 1000) {
+      const toDelete = Array.from(this.processedJobPDAs).slice(0, 100)
+      toDelete.forEach(pda => this.processedJobPDAs.delete(pda))
+    }
+
+    // 1. Verify job account exists on-chain with retry
     try {
-      const accountInfo = await this.connection.getAccountInfo(new PublicKey(event.job))
-      if (!accountInfo) {
-        throw new Error(`Job account not found on-chain: ${event.job}`)
-      }
-      log.debug('Job account verified on-chain', { job: event.job })
+      await this.verifyJobAccountWithRetry(event.job)
     } catch (error) {
-      log.error('On-chain verification failed', error, { job: event.job })
+      log.error('Job account verification failed after retries', error, { job: event.job })
       throw error
     }
 
@@ -410,6 +427,104 @@ export class GatekeeperEventListener {
       log.error('Failed to enqueue job', error, { job: event.job })
       throw error
     }
+  }
+
+  /**
+   * Verify CID account exists on-chain with retry logic
+   * Retries up to 3 times with exponential backoff
+   */
+  private async verifyCidAccountWithRetry(cidPda: string, maxRetries = 3): Promise<void> {
+    const delays = [500, 1000, 2000] // ms
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const accountInfo = await this.connection.getAccountInfo(
+          new PublicKey(cidPda),
+          'confirmed' // Use confirmed commitment for consistency with event subscription
+        )
+
+        if (accountInfo) {
+          log.debug('CID account verified on-chain', {
+            cid: cidPda.slice(0, 8) + '...',
+            attempt: attempt + 1
+          })
+          return
+        }
+
+        // Account not found, retry
+        if (attempt < maxRetries - 1) {
+          log.warn('CID account not found, retrying...', {
+            cid: cidPda.slice(0, 8) + '...',
+            attempt: attempt + 1,
+            next_retry_ms: delays[attempt]
+          })
+          await new Promise(resolve => setTimeout(resolve, delays[attempt]))
+        }
+      } catch (error) {
+        if (attempt < maxRetries - 1) {
+          log.warn('CID account fetch error, retrying...', {
+            error,
+            cid: cidPda.slice(0, 8) + '...',
+            attempt: attempt + 1,
+            next_retry_ms: delays[attempt]
+          })
+          await new Promise(resolve => setTimeout(resolve, delays[attempt]))
+        } else {
+          throw error
+        }
+      }
+    }
+
+    throw new Error(`CID account not found on-chain after ${maxRetries} attempts: ${cidPda}`)
+  }
+
+  /**
+   * Verify job account exists on-chain with retry logic
+   * Retries up to 3 times with exponential backoff
+   */
+  private async verifyJobAccountWithRetry(jobPda: string, maxRetries = 3): Promise<void> {
+    const delays = [500, 1000, 2000] // ms
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const accountInfo = await this.connection.getAccountInfo(
+          new PublicKey(jobPda),
+          'confirmed' // Use confirmed commitment for faster response
+        )
+
+        if (accountInfo) {
+          log.debug('Job account verified on-chain', {
+            job: jobPda.slice(0, 8) + '...',
+            attempt: attempt + 1
+          })
+          return
+        }
+
+        // Account not found, retry
+        if (attempt < maxRetries - 1) {
+          log.warn('Job account not found, retrying...', {
+            job: jobPda.slice(0, 8) + '...',
+            attempt: attempt + 1,
+            next_retry_ms: delays[attempt]
+          })
+          await new Promise(resolve => setTimeout(resolve, delays[attempt]))
+        }
+      } catch (error) {
+        if (attempt < maxRetries - 1) {
+          log.warn('Job account fetch error, retrying...', {
+            error,
+            job: jobPda.slice(0, 8) + '...',
+            attempt: attempt + 1,
+            next_retry_ms: delays[attempt]
+          })
+          await new Promise(resolve => setTimeout(resolve, delays[attempt]))
+        } else {
+          throw error
+        }
+      }
+    }
+
+    throw new Error(`Job account not found on-chain after ${maxRetries} attempts: ${jobPda}`)
   }
 
   /**

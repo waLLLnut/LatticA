@@ -18,8 +18,6 @@ import {
   calcPolicyHash,
   calcDomainHash,
   calcCommitment,
-  generateNonce,
-  isValidHex32,
   canonicalJson,         // for stable policy_ctx stringification (display/debug)
 } from '@/lib/crypto-utils'
 import { getInstructionDiscriminator } from '@/lib/anchor-utils'
@@ -29,6 +27,26 @@ const log = createLogger('API:SubmitJob')
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed')
 const MEMO_PROGRAM_ID = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr')
 const MAX_CIDS = 16
+
+// Demo: Fixed batch window for simplified workflow
+const DEMO_BATCH_WINDOW = new PublicKey('11111111111111111111111111111111')
+
+// Demo: Predefined IR digests for common operations
+const IR_DIGESTS: Record<string, string> = {
+  'deposit': '0x' + 'ADD0'.padEnd(64, '0'),      // FHE16.ADD for deposit
+  'withdraw': '0x' + 'WITHDRAW'.padEnd(64, '0'), // Withdrawal operation
+  'borrow': '0x' + 'MUL0'.padEnd(64, '0'),       // FHE16.MUL for borrow
+  'liquidation': '0x' + 'HEALTHCHECK'.padEnd(64, '0'), // Health factor check (0.5 LTV)
+}
+
+// Demo: Required CID count for each operation (for validation)
+const REQUIRED_CID_COUNTS: Record<string, { min: number; max: number; description: string }> = {
+  'deposit': { min: 2, max: 2, description: '2 CIDs: amount1 + amount2 (FHE16.ADD)' },
+  'withdraw': { min: 1, max: 1, description: '1 CID: withdrawal amount' },
+  'borrow': { min: 2, max: 2, description: '2 CIDs: amount * interest_rate (FHE16.MUL)' },
+  'liquidation': { min: 3, max: 3, description: '3 CIDs: collateral, debt, price (health check @ 0.5 LTV)' },
+  'custom': { min: 1, max: MAX_CIDS, description: `1-${MAX_CIDS} CIDs for custom operation` },
+}
 
 function cors(res: NextResponse) {
   res.headers.set('Access-Control-Allow-Origin', '*')
@@ -51,7 +69,7 @@ function getFHEcpkInfo() {
       gatekeeper_program: 'GateF9qDULEJRgt6m1prkmUWrEXGVhDzYCgCJtGtnwu9',
       key_epoch: 7,
       key_expiry_slot: 234567890,
-      fhe_scheme: 'FHE16',
+      fhe_scheme: 'FHE16_0.0.1v',
       ir_schema_hash: '0x'.padEnd(66, 'A'),
       enc_params_schema_hash: '0x'.padEnd(66, 'B'),
       policy_schema_hash: '0x'.padEnd(66, 'C'),
@@ -128,6 +146,7 @@ export async function GET(request: NextRequest) {
 
   const { searchParams } = new URL(request.url)
   const cidsParam = searchParams.get('cids')
+  const operationParam = searchParams.get('operation') || 'deposit'
 
   let preview: any = null
   if (cidsParam) {
@@ -136,15 +155,21 @@ export async function GET(request: NextRequest) {
       let parsed = JSON.parse(cidsParam)
       if (!Array.isArray(parsed) && parsed && Array.isArray(parsed.cids)) parsed = parsed.cids
       const cid_count = Array.isArray(parsed) ? parsed.length : 0
+
+      // Check operation requirements
+      const requirement = REQUIRED_CID_COUNTS[operationParam] || REQUIRED_CID_COUNTS['custom']
+      const isValidCount = cid_count >= requirement.min && cid_count <= requirement.max
+
       preview = {
-        status: cid_count > 0 && cid_count <= MAX_CIDS ? 'ready' : 'invalid',
+        operation: operationParam,
+        status: isValidCount ? 'ready' : 'invalid',
         cid_count,
-        message:
-          cid_count > 0 && cid_count <= MAX_CIDS
-            ? `Ready to submit job with ${cid_count} CID reference(s)`
-            : cid_count > MAX_CIDS
-            ? `Too many CIDs (max ${MAX_CIDS})`
-            : 'No CIDs provided. Use /api/actions/job/registerCIDs first.',
+        required: requirement.description,
+        message: isValidCount
+          ? `Ready to submit ${operationParam} job with ${cid_count} CID(s)`
+          : cid_count === 0
+          ? 'No CIDs provided. Use /api/actions/job/registerCIDs first.'
+          : `Invalid CID count for ${operationParam}: expected ${requirement.min}${requirement.min !== requirement.max ? `-${requirement.max}` : ''}, got ${cid_count}`,
       }
     } catch {
       preview = { status: 'error', message: 'Invalid cids parameter format (use JSON array)' }
@@ -161,16 +186,18 @@ export async function GET(request: NextRequest) {
     disabled: false,
     domain: { ...fhe, domain_hash },
     policy: {
-      inputRequirement: `cids = JSON array of CID PDA addresses from /registerCIDs (max ${MAX_CIDS}).`,
+      inputRequirement: 'cids = JSON array of CID PDA addresses from /registerCIDs',
+      cidRequirements: REQUIRED_CID_COUNTS,
+      decryption: 'Owner-Controlled (private) or Protocol-Managed (shared access)',
       canonicalization: 'policy_ctx is canonical-JSON stringified (sorted keys).',
-      nonce: '32-byte hex (0x + 64). If omitted, server generates.',
       remaining_accounts: 'CID handles are passed as remaining_accounts in transaction',
+      batch_window: 'Fixed to demo batch window (simplified for demo)',
     },
     hashSpec: {
       cid_set_id: 'sha256(concat(cid_handle_1 || cid_handle_2 || ... )) -> 32B hex',
       policy_hash: 'sha256(canonical_json(policy_ctx)) -> 32B hex',
       domain_hash: 'sha256(chain_id || program || cpk_id || epoch) -> 32B hex',
-      commitment: 'sha256(cid_set_id || ir_digest || policy_hash || domain_hash || nonce) -> 32B hex',
+      commitment: 'sha256(cid_set_id || ir_digest || policy_hash || domain_hash) -> 32B hex',
       argOrder: ['batch', 'cid_set_id', 'commitment', 'ir_digest', 'policy_hash', 'provenance'],
       accountsOrder: ['config', 'job', 'batch', 'submitter', 'system_program', '...cid_handles (remaining)'],
     },
@@ -178,25 +205,43 @@ export async function GET(request: NextRequest) {
     links: {
       actions: [
         {
-          href: `${baseURL}/api/actions/job/submit?cids={cids}&batch={batch}&ir_digest={ir_digest}&policy_type={policy_type}&provenance={provenance}&nonce={nonce}`,
+          href: `${baseURL}/api/actions/job/submit?cids={cids}&operation={operation}&policy_type={policy_type}&provenance={provenance}`,
           label: 'Submit Job',
           parameters: [
-            { name: 'cids', label: 'Registered CID PDAs (JSON array)', required: true },
-            { name: 'batch', label: 'Batch Window Pubkey', required: true },
-            { name: 'ir_digest', label: 'IR Digest (0x…64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
+            { name: 'cids', label: 'Registered CID PDAs (JSON array or comma-separated)', required: true },
+            {
+              name: 'operation',
+              label: 'FHE Operation',
+              type: 'select',
+              required: true,
+              options: [
+                { label: 'Deposit (2 CIDs: FHE16.ADD)', value: 'deposit', selected: true },
+                { label: 'Withdraw (1 CID)', value: 'withdraw' },
+                { label: 'Borrow (2 CIDs: FHE16.MUL)', value: 'borrow' },
+                { label: 'Liquidation (3 CIDs: Health Check)', value: 'liquidation' },
+                { label: 'Custom (1-16 CIDs)', value: 'custom' },
+              ],
+            },
             {
               name: 'policy_type',
-              label: 'Policy Type',
+              label: 'Decryption Policy',
               type: 'select',
               required: false,
               options: [
-                { label: 'Compute Only', value: 'compute', selected: true },
-                { label: 'Compute & Store', value: 'compute-store' },
-                { label: 'Full Access', value: 'full' },
+                { label: 'Owner-Controlled (Private)', value: 'owner-controlled', selected: true },
+                { label: 'Protocol-Managed (Shared)', value: 'protocol-managed' },
               ],
             },
-            { name: 'provenance', label: 'Provenance (server|client|oracle|dapp|0|1|2|3)', required: false },
-            { name: 'nonce', label: 'Optional Nonce (0x…64hex)', required: false, pattern: '^0x[0-9a-fA-F]{64}$' },
+            {
+              name: 'provenance',
+              label: 'Call Type',
+              type: 'select',
+              required: false,
+              options: [
+                { label: 'Direct Owner Call', value: '1', selected: true },
+                { label: 'CPI Call', value: '0' },
+              ],
+            },
           ],
         },
       ],
@@ -215,30 +260,48 @@ export async function POST(req: NextRequest) {
     const bodyData = (rawBody && (rawBody.data || rawBody)) || {}
     const account = rawBody?.account
 
-    // Prefer simple params; fall back to legacy
+    // Simplified parameters (registerCIDs style)
     const cids_raw = url.searchParams.get('cids') ?? bodyData.cids
+    const operation = url.searchParams.get('operation') ?? bodyData.operation ?? 'deposit'
+    const policy_type_raw = url.searchParams.get('policy_type') ?? bodyData.policy_type ?? 'owner-controlled'
+    const policy_ctx_raw = url.searchParams.get('policy_ctx') ?? bodyData.policy_ctx
+    const provenance_raw = url.searchParams.get('provenance') ?? bodyData.provenance ?? '1'
+
+    // Backward compatibility: support old parameter names
     const batch_raw = url.searchParams.get('batch') ?? bodyData.batch
     const ir_digest_raw = url.searchParams.get('ir_digest') ?? bodyData.ir_digest
-    const policy_type_raw = url.searchParams.get('policy_type') ?? bodyData.policy_type
-    const policy_ctx_raw = url.searchParams.get('policy_ctx') ?? bodyData.policy_ctx
-    const provenance_raw = url.searchParams.get('provenance') ?? bodyData.provenance ?? 'client'
-    const nonce_raw = url.searchParams.get('nonce') ?? bodyData.nonce
 
-    if (!account || !cids_raw || !batch_raw || !ir_digest_raw) {
+    if (!account || !cids_raw) {
       return cors(
         NextResponse.json(
-          { message: 'Missing required fields: account, cids, batch, ir_digest' },
+          { message: 'Missing required fields: account, cids' },
           { status: 400 },
         ),
       )
     }
 
-    // Parse CIDs: support array or nested {cids:[...]} or stringified JSON
+    // Parse CIDs: support multiple formats for flexibility
     let parsedCids: string[]
     try {
       if (typeof cids_raw === 'string') {
-        const tmp = JSON.parse(cids_raw)
-        parsedCids = Array.isArray(tmp) ? tmp : Array.isArray(tmp?.cids) ? tmp.cids : []
+        // Try JSON parse first
+        try {
+          const tmp = JSON.parse(cids_raw)
+          parsedCids = Array.isArray(tmp) ? tmp : Array.isArray(tmp?.cids) ? tmp.cids : []
+        } catch {
+          // Fallback: comma-separated, space-separated, or single value
+          // Remove brackets if present: [addr1,addr2] → addr1,addr2
+          const cleaned = cids_raw.replace(/^\[|\]$/g, '').trim()
+          if (cleaned.includes(',')) {
+            parsedCids = cleaned.split(',').map(s => s.trim()).filter(s => s.length > 0)
+          } else if (cleaned.includes(' ')) {
+            parsedCids = cleaned.split(/\s+/).filter(s => s.length > 0)
+          } else if (cleaned.length > 0) {
+            parsedCids = [cleaned]
+          } else {
+            parsedCids = []
+          }
+        }
       } else if (Array.isArray(cids_raw)) {
         parsedCids = cids_raw
       } else if (cids_raw && Array.isArray(cids_raw.cids)) {
@@ -246,8 +309,16 @@ export async function POST(req: NextRequest) {
       } else {
         parsedCids = []
       }
-    } catch {
-      return cors(NextResponse.json({ message: 'Invalid JSON in cids (use JSON array)' }, { status: 400 }))
+    } catch (e) {
+      log.error('CID parsing error', e)
+      return cors(NextResponse.json({
+        message: 'Invalid cids format. Use JSON array ["addr1","addr2"] or comma-separated addr1,addr2',
+        examples: [
+          'JSON: ["GDyT4XD7CTLVdYyVAbr6JT4L1J28WDJquReFiK1v9ims"]',
+          'Comma: GDyT4XD7CTLVdYyVAbr6JT4L1J28WDJquReFiK1v9ims,AnotherAddress...',
+          'Brackets: [GDyT4XD7CTLVdYyVAbr6JT4L1J28WDJquReFiK1v9ims]'
+        ]
+      }, { status: 400 }))
     }
 
     if (!Array.isArray(parsedCids) || parsedCids.length === 0) {
@@ -255,6 +326,27 @@ export async function POST(req: NextRequest) {
     }
     if (parsedCids.length > MAX_CIDS) {
       return cors(NextResponse.json({ message: `Too many CIDs (max ${MAX_CIDS})` }, { status: 400 }))
+    }
+
+    // Log parsed CIDs for debugging
+    log.info('Parsed CIDs', {
+      raw_input: cids_raw,
+      parsed: parsedCids,
+      count: parsedCids.length,
+      operation
+    })
+
+    // Validate CID count based on operation type
+    const cidRequirement = REQUIRED_CID_COUNTS[operation] || REQUIRED_CID_COUNTS['custom']
+    if (parsedCids.length < cidRequirement.min || parsedCids.length > cidRequirement.max) {
+      return cors(NextResponse.json({
+        message: `Invalid CID count for operation '${operation}'`,
+        required: cidRequirement.description,
+        provided: parsedCids.length,
+        hint: cidRequirement.min === cidRequirement.max
+          ? `This operation requires exactly ${cidRequirement.min} CID(s)`
+          : `This operation requires ${cidRequirement.min}-${cidRequirement.max} CID(s)`
+      }, { status: 400 }))
     }
 
     // Validate base58 Pubkeys
@@ -276,30 +368,49 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // Validate batch & ir_digest
-    let batchPubkey: PublicKey
-    try {
-      batchPubkey = new PublicKey(batch_raw)
-    } catch {
-      return cors(NextResponse.json({ message: 'Invalid batch public key' }, { status: 400 }))
-    }
-    const ir_digest = String(ir_digest_raw)
-    if (!/^0x[0-9a-fA-F]{64}$/.test(ir_digest)) {
-      return cors(NextResponse.json({ message: 'ir_digest must be 0x + 64 hex chars' }, { status: 400 }))
+    // Batch window: Use fixed demo batch or backward compatibility
+    const batchPubkey = batch_raw ? new PublicKey(batch_raw) : DEMO_BATCH_WINDOW
+
+    // IR Digest: Map operation to predefined digest or use custom
+    let ir_digest: string
+    if (operation === 'custom' && ir_digest_raw) {
+      ir_digest = String(ir_digest_raw)
+      if (!/^0x[0-9a-fA-F]{64}$/.test(ir_digest)) {
+        return cors(NextResponse.json({ message: 'Custom ir_digest must be 0x + 64 hex chars' }, { status: 400 }))
+      }
+    } else if (operation === 'custom') {
+      return cors(NextResponse.json({ message: 'Custom operation requires ir_digest parameter' }, { status: 400 }))
+    } else {
+      ir_digest = IR_DIGESTS[operation]
+      if (!ir_digest) {
+        return cors(NextResponse.json({
+          message: 'Invalid operation',
+          valid_operations: Object.keys(IR_DIGESTS).concat(['custom'])
+        }, { status: 400 }))
+      }
+      log.debug('Using IR digest for operation', { operation, ir_digest })
     }
 
     // Build policy_ctx:
-    // - If policy_type provided: map → policy_ctx
+    // - If policy_type provided: map → policy_ctx with decryption permissions
     // - Else: require policy_ctx JSON
     let policy_ctx: PolicyContext
     if (policy_type_raw) {
-      const policyMap: Record<string, string[]> = {
-        'compute': ['compute'],
-        'compute-store': ['compute', 'store'],
-        'full': ['compute', 'store', 'transfer'],
+      const policyMap: Record<string, { allow: string[]; decrypt_by: string }> = {
+        'owner-controlled': { allow: ['compute'], decrypt_by: 'owner' },  // Private: owner only
+        'protocol-managed': { allow: ['compute', 'store'], decrypt_by: 'protocol' }, // Shared: protocol access
+        // Backward compatibility
+        'compute': { allow: ['compute'], decrypt_by: 'owner' },
+        'compute-decrypt-owner': { allow: ['compute'], decrypt_by: 'owner' },
+        'compute-store': { allow: ['compute', 'store'], decrypt_by: 'protocol' },
+        'full': { allow: ['compute', 'store', 'transfer'], decrypt_by: 'protocol' },
       }
-      const allow = policyMap[String(policy_type_raw)] || ['compute']
-      policy_ctx = { allow, version: '1.0' }
+      const policyConfig = policyMap[String(policy_type_raw)] || policyMap['owner-controlled']
+      policy_ctx = {
+        allow: policyConfig.allow,
+        version: '1.0',
+        decrypt_by: policyConfig.decrypt_by
+      }
     } else {
       try {
         policy_ctx =
@@ -312,14 +423,16 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Provenance normalization → small enum number (demo: server=0, client=1, oracle=2, dapp=3)
+    // Provenance: Simplified to u8 (0=CPI call, 1=direct owner call)
     let provenanceValue: number
-    const provStr = String(provenance_raw).toLowerCase()
-    if (/^[0-3]$/.test(provStr)) {
+    const provStr = String(provenance_raw)
+    if (/^[0-1]$/.test(provStr)) {
       provenanceValue = parseInt(provStr, 10)
     } else {
-      const map: Record<string, number> = { server: 0, client: 1, oracle: 2, dapp: 3 }
-      provenanceValue = map[provStr] ?? 1
+      return cors(NextResponse.json({
+        message: 'Invalid provenance value',
+        valid_values: ['0 (CPI call)', '1 (direct owner call)']
+      }, { status: 400 }))
     }
 
     // Build submitter pubkey
@@ -351,18 +464,27 @@ export async function POST(req: NextRequest) {
       check_owner: false,
     })
     if (!validation.all_valid) {
-      log.error('CID validation failed', { invalid_count: validation.invalid_count })
+      const failedDetails = validation.results
+        .filter((r: any) => !r.valid)
+        .map((r: any) => ({ cid: r.cid_pda, reason: r.reason, status: r.status }))
+
+      log.error('CID validation failed', {
+        invalid_count: validation.invalid_count,
+        parsed_cids: parsedCids,
+        failed_details: failedDetails,
+        all_results: validation.results
+      })
+
       return cors(
         NextResponse.json(
           {
             message: 'CID validation failed: All CIDs must be confirmed on-chain',
+            provided_cids: parsedCids,
             validation: {
               all_valid: false,
               invalid_count: validation.invalid_count,
               invalid_cids: validation.invalid_cids,
-              details: validation.results
-                .filter((r: any) => !r.valid)
-                .map((r: any) => ({ cid: r.cid_pda, reason: r.reason, status: r.status })),
+              details: failedDetails,
             },
             hint:
               'Wait for CIDRegistered events before submitting jobs. Check pending CIDs with GET /api/actions/job/registerCIDs',
@@ -375,13 +497,35 @@ export async function POST(req: NextRequest) {
     // All CIDs must share same policy_hash
     const jobValidation = cidValidator.validate_for_job_submission(parsedCids, policy_hash)
     if (!jobValidation.policy_compatible) {
-      return cors(NextResponse.json({ message: 'CIDs have incompatible policies (different policy_hash values)' }, { status: 400 }))
+      log.error('Policy hash mismatch', {
+        expected_policy_hash: policy_hash,
+        policy_ctx,
+        policy_type: policy_type_raw,
+        cid_policy_hashes: validation.results.map((r: any) => ({
+          cid: r.cid_pda,
+          policy_hash: r.policy_hash
+        }))
+      })
+
+      return cors(NextResponse.json({
+        message: 'CIDs have incompatible policies (different policy_hash values)',
+        expected_policy: {
+          policy_type: policy_type_raw,
+          policy_ctx,
+          policy_hash
+        },
+        cid_policies: validation.results.map((r: any) => ({
+          cid: r.cid_pda,
+          policy_hash: r.policy_hash,
+          matches: r.policy_hash === policy_hash
+        })),
+        hint: 'CIDs must be registered with the same policy as the job submission. Check the policy_type used during CID registration.'
+      }, { status: 400 }))
     }
 
-    // Hashes
+    // Hashes (nonce removed for simplified demo)
     const cid_set_id = calcCidSetId(parsedCids)
-    const nonce_hex = nonce_raw && isValidHex32(nonce_raw) ? String(nonce_raw) : generateNonce()
-    const commitment = calcCommitment(cid_set_id, ir_digest, policy_hash, domain_hash, nonce_hex)
+    const commitment = calcCommitment(cid_set_id, ir_digest, policy_hash, domain_hash)
 
     // PDAs
     const configPda = deriveConfigPda(gatekeeperProgram)
@@ -403,7 +547,7 @@ export async function POST(req: NextRequest) {
     })
 
     // Optional memo for traceability
-    const reference = generateNonce()
+    const reference = Date.now().toString(36)
     const memoIx = new TransactionInstruction({
       programId: MEMO_PROGRAM_ID,
       keys: [],
@@ -464,10 +608,10 @@ export async function POST(req: NextRequest) {
           preimage: {
             cids: parsedCids,
             batch: batchPubkey.toBase58(),
+            operation,
             ir_digest,
             policy_ctx: JSON.parse(canonicalJson(policy_ctx)),
             provenance: provenanceValue,
-            nonce: nonce_hex,
           },
           hashes: { cid_set_id, policy_hash, commitment },
           pda: { config: configPda.toBase58(), job: jobPda.toBase58() },

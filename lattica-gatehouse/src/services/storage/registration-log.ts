@@ -1,6 +1,8 @@
 /**
  * Registration Log
  * Tracks registration events for on-chain verification
+ *
+ * Uses globalThis to ensure singleton persistence across Next.js hot reloads
  */
 
 import { createLogger } from '@/lib/logger'
@@ -9,8 +11,12 @@ import { DEFAULT_STORAGE_CONFIG } from './types'
 
 const log = createLogger('RegistrationLog')
 
+// Declare global type for TypeScript
+declare global {
+  var __registrationLog: RegistrationLog | undefined
+}
+
 class RegistrationLog {
-  private static instance: RegistrationLog
   private records: Map<string, RegistrationRecord>          // reg_id -> RegistrationRecord
   private entries: Map<string, RegistrationLogEntry>        // cid_pda -> RegistrationLogEntry
   private ownerIndex: Map<string, Set<string>>              // owner -> Set<reg_id>
@@ -19,13 +25,15 @@ class RegistrationLog {
     this.records = new Map()
     this.entries = new Map()
     this.ownerIndex = new Map()
+    log.debug('RegistrationLog instance created')
   }
 
   static getInstance(): RegistrationLog {
-    if (!RegistrationLog.instance) {
-      RegistrationLog.instance = new RegistrationLog()
+    // Use globalThis to persist across hot reloads
+    if (!globalThis.__registrationLog) {
+      globalThis.__registrationLog = new RegistrationLog()
     }
-    return RegistrationLog.instance
+    return globalThis.__registrationLog
   }
 
   /**

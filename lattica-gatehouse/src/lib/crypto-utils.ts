@@ -80,22 +80,29 @@ export function calcDomainHash(domain: {
 
 /**
  * Calculate commitment hash
- * commitment = sha256(cid_set_id || ir_digest || policy_hash || domain_hash || nonce)
+ * commitment = sha256(cid_set_id || ir_digest || policy_hash || domain_hash [|| nonce])
+ * Note: nonce is optional for simplified demo workflow
  */
 export function calcCommitment(
   cidSetId: string,
   irDigest: string,
   policyHash: string,
   domainHash: string,
-  nonce: string,
+  nonce?: string,
 ): string {
-  return sha256Hex(Buffer.concat([
+  const buffers = [
     hex32(cidSetId),
     hex32(irDigest),
     hex32(policyHash),
     hex32(domainHash),
-    hex32(nonce),
-  ]))
+  ]
+
+  // Include nonce only if provided (for backward compatibility)
+  if (nonce) {
+    buffers.push(hex32(nonce))
+  }
+
+  return sha256Hex(Buffer.concat(buffers))
 }
 
 /**
