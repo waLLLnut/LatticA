@@ -1,6 +1,8 @@
 /**
  * Solana Connection Manager
  * Manages WebSocket connections with auto-reconnect
+ *
+ * Uses globalThis to ensure singleton persistence across Next.js hot reloads
  */
 
 import { Connection, PublicKey } from '@solana/web3.js'
@@ -23,8 +25,12 @@ const DEFAULT_CONFIG: ConnectionConfig = {
   reconnect_delay_ms: 5000,
 }
 
+// Declare global type for TypeScript
+declare global {
+  var __connectionManager: ConnectionManager | undefined
+}
+
 export class ConnectionManager {
-  private static instance: ConnectionManager
   private connection: Connection
   private config: ConnectionConfig
   private reconnectAttempts: number = 0
@@ -41,13 +47,15 @@ export class ConnectionManager {
     )
     this.isConnected = true
     log.info('Connected to Solana', { rpc: this.config.rpc_url })
+    log.debug('ConnectionManager instance created')
   }
 
   static getInstance(config?: ConnectionConfig): ConnectionManager {
-    if (!ConnectionManager.instance) {
-      ConnectionManager.instance = new ConnectionManager(config)
+    // Use globalThis to persist across hot reloads
+    if (!globalThis.__connectionManager) {
+      globalThis.__connectionManager = new ConnectionManager(config)
     }
-    return ConnectionManager.instance
+    return globalThis.__connectionManager
   }
 
   /**

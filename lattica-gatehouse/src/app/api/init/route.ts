@@ -13,6 +13,55 @@ import { ciphertextStore } from '@/services/storage/ciphertext-store'
 const log = createLogger('API:Init')
 import { pendingCiphertextStore } from '@/services/storage/pending-store'
 
+// IR Digest to operation type mapping (reverse lookup)
+// These are the actual hex values stored on-chain
+const IR_DIGEST_TO_OPERATION: Record<string, { name: string; description: string }> = {
+  // Deposit: FHE16.ADD(amount1, amount2)
+  '0xadd00000000000000000000000000000000000000000000000000000000000000000': {
+    name: 'deposit',
+    description: 'Balance += FHE16.ADD(amount1, amount2)'
+  },
+  // Withdraw: Balance deduction with validation
+  '0x8fae5df19cb6bc3db4ea7dfc14a9696be683910c9fee64d839a6eef9981129a1': {
+    name: 'withdraw',
+    description: 'Balance -= amount (with validation)'
+  },
+  // Borrow: FHE16.MUL for health check
+  '0xmul00000000000000000000000000000000000000000000000000000000000000000': {
+    name: 'borrow',
+    description: 'Health Check - FHE16.MUL(collateral, 0.5) >= loan_amount'
+  },
+  // Liquidation: Health factor check at 0.5 LTV
+  '0xhealthcheck0000000000000000000000000000000000000000000000000000000': {
+    name: 'liquidation',
+    description: 'LTV Check - FHE16.DIV(debt, collateral) > 0.5 threshold'
+  },
+}
+
+function getOperationInfo(irDigest: string): { name: string; description: string } {
+  // Normalize ir_digest for lookup (lowercase)
+  const normalized = irDigest.toLowerCase()
+  const operation = IR_DIGEST_TO_OPERATION[normalized]
+
+  if (operation) {
+    return operation
+  }
+
+  // Fallback: Try pattern matching
+  const upper = irDigest.toUpperCase().replace(/^0X/, '')
+  if (upper.startsWith('ADD0')) {
+    return { name: 'deposit', description: 'Balance += FHE16.ADD(amount1, amount2)' }
+  } else if (upper.includes('WITHDRAW')) {
+    return { name: 'withdraw', description: 'Balance -= amount (with validation)' }
+  } else if (upper.startsWith('MUL0')) {
+    return { name: 'borrow', description: 'Health Check - FHE16.MUL(collateral, 0.5) >= loan_amount' }
+  } else if (upper.includes('HEALTHCHECK')) {
+    return { name: 'liquidation', description: 'LTV Check - FHE16.DIV(debt, collateral) > 0.5 threshold' }
+  }
+
+  return { name: 'custom', description: 'Custom IR operation' }
+}
+
 export async function GET() {
   try {
     // Initialize if not already
@@ -34,6 +83,8 @@ export async function GET() {
     // - Consider caching for frequently accessed data
     const queuedJobs = jobQueue.get_queued_jobs()
     const executingJobs = jobQueue.get_executing_jobs()
+    const completedJobs = jobQueue.get_completed_jobs()
+    const failedJobs = jobQueue.get_failed_jobs()
     const allCids = ciphertextStore.get_all()
 
     // Format CID list (limit to recent 10 for demo)
@@ -46,20 +97,93 @@ export async function GET() {
       ciphertext_hash: cid.ciphertext_hash.slice(0, 16) + '...',
     }))
 
-    // Format Job list
-    const jobsList = queuedJobs.map(job => ({
-      job_pda: job.job,
-      batch: job.batch,
-      cid_count: job.cid_handles.length,
-      slot: job.slot,
-      status: 'queued',
-    })).concat(executingJobs.map(job => ({
-      job_pda: job.job,
-      batch: job.batch,
-      cid_count: job.cid_handles.length,
-      slot: job.slot,
-      status: 'executing',
-    })))
+    // Format Job list with detailed info for FHE executor interface
+    const jobsList = queuedJobs.map(job => {
+      const opInfo = getOperationInfo(job.ir_digest)
+      return {
+        job_pda: job.job_pda,
+        submitter: job.submitter,
+        batch: job.batch,
+        cid_handles: job.cid_handles,
+        cid_count: job.cid_handles.length,
+        ir_digest: job.ir_digest,
+        operation: opInfo.name,
+        operation_desc: opInfo.description,
+        policy_hash: job.policy_hash,
+        commitment: job.commitment,
+        provenance: job.provenance,
+        slot: job.slot,
+        queued_at: job.queued_at,
+        submitted_at: job.submitted_at,
+        status: 'queued',
+      }
+    }).concat(executingJobs.map(job => {
+      const opInfo = getOperationInfo(job.ir_digest)
+      return {
+        job_pda: job.job_pda,
+        submitter: job.submitter,
+        batch: job.batch,
+        cid_handles: job.cid_handles,
+        cid_count: job.cid_handles.length,
+        ir_digest: job.ir_digest,
+        operation: opInfo.name,
+        operation_desc: opInfo.description,
+        policy_hash: job.policy_hash,
+        commitment: job.commitment,
+        provenance: job.provenance,
+        slot: job.slot,
+        queued_at: job.queued_at,
+        submitted_at: job.submitted_at,
+        execution_started_at: job.execution_started_at,
+        executor: job.executor,
+        status: job.status,  // Return actual status (assigned or executing)
+      }
+    })).concat(completedJobs.map(job => {
+      const opInfo = getOperationInfo(job.ir_digest)
+      return {
+        job_pda: job.job_pda,
+        submitter: job.submitter,
+        batch: job.batch,
+        cid_handles: job.cid_handles,
+        cid_count: job.cid_handles.length,
+        ir_digest: job.ir_digest,
+        operation: opInfo.name,
+        operation_desc: opInfo.description,
+        policy_hash: job.policy_hash,
+        commitment: job.commitment,
+        provenance: job.provenance,
+        slot: job.slot,
+        queued_at: job.queued_at,
+        submitted_at: job.submitted_at,
+        execution_started_at: job.execution_started_at,
+        execution_completed_at: job.execution_completed_at,
+        executor: job.executor,
+        result_handle: job.result_handle,
+        status: 'completed',
+      }
+    })).concat(failedJobs.map(job => {
+      const opInfo = getOperationInfo(job.ir_digest)
+      return {
+        job_pda: job.job_pda,
+        submitter: job.submitter,
+        batch: job.batch,
+        cid_handles: job.cid_handles,
+        cid_count: job.cid_handles.length,
+        ir_digest: job.ir_digest,
+        operation: opInfo.name,
+        operation_desc: opInfo.description,
+        policy_hash: job.policy_hash,
+        commitment: job.commitment,
+        provenance: job.provenance,
+        slot: job.slot,
+        queued_at: job.queued_at,
+        submitted_at: job.submitted_at,
+        execution_started_at: job.execution_started_at,
+        execution_completed_at: job.execution_completed_at,
+        executor: job.executor,
+        status: 'failed',
+      }
+    }))
 
     return NextResponse.json({
       status: 'ok',

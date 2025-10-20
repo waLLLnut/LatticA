@@ -2,6 +2,8 @@
  * Job Queue
  * Event-driven job scheduling for FHE execution
  * Jobs are only enqueued after on-chain confirmation
+ *
+ * Uses globalThis to ensure singleton persistence across Next.js hot reloads
  */
 
 import { createLogger } from '@/lib/logger'
@@ -10,8 +12,12 @@ import type { JobSubmittedEvent } from '@/types/events'
 
 const log = createLogger('JobQueue')
 
+// Declare global type for TypeScript
+declare global {
+  var __jobQueue: JobQueue | undefined
+}
+
 class JobQueue {
-  private static instance: JobQueue
   private jobs: Map<string, QueuedJob>              // job_pda -> QueuedJob
   private batchIndex: Map<string, Set<string>>      // batch_pda -> Set<job_pda>
   private slotIndex: Map<number, Set<string>>       // slot -> Set<job_pda>
@@ -20,13 +26,15 @@ class JobQueue {
     this.jobs = new Map()
     this.batchIndex = new Map()
     this.slotIndex = new Map()
+    log.debug('JobQueue instance created')
   }
 
   static getInstance(): JobQueue {
-    if (!JobQueue.instance) {
-      JobQueue.instance = new JobQueue()
+    // Use globalThis to persist across hot reloads
+    if (!globalThis.__jobQueue) {
+      globalThis.__jobQueue = new JobQueue()
     }
-    return JobQueue.instance
+    return globalThis.__jobQueue
   }
 
   /**
@@ -126,6 +134,34 @@ class JobQueue {
   }
 
   /**
+   * Get executing jobs (currently being processed)
+   * Includes both 'assigned' and 'executing' states
+   */
+  get_executing_jobs(): QueuedJob[] {
+    return Array.from(this.jobs.values())
+      .filter(job => job.status === 'assigned' || job.status === 'executing')
+      .sort((a, b) => a.slot - b.slot)
+  }
+
+  /**
+   * Get completed jobs
+   */
+  get_completed_jobs(): QueuedJob[] {
+    return Array.from(this.jobs.values())
+      .filter(job => job.status === 'completed')
+      .sort((a, b) => (b.execution_completed_at || 0) - (a.execution_completed_at || 0))
+  }
+
+  /**
+   * Get failed jobs
+   */
+  get_failed_jobs(): QueuedJob[] {
+    return Array.from(this.jobs.values())
+      .filter(job => job.status === 'failed')
+      .sort((a, b) => (b.execution_completed_at || 0) - (a.execution_completed_at || 0))
+  }
+
+  /**
    * Update job status
    */
   update_job_status(
@@ -187,7 +223,9 @@ class JobQueue {
   get_stats(): JobQueueStats {
     const jobs = Array.from(this.jobs.values())
     const queued = jobs.filter(j => j.status === 'queued')
-    const executing = jobs.filter(j => j.status === 'executing')
+    // Include both 'assigned' and 'executing' in executing_count
+    // (assigned = claimed by executor, about to execute)
+    const executing = jobs.filter(j => j.status === 'assigned' || j.status === 'executing')
     const completed = jobs.filter(j => j.status === 'completed')
     const failed = jobs.filter(j => j.status === 'failed')
 

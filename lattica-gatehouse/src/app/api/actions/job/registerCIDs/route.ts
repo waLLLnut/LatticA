@@ -42,7 +42,7 @@ function getFHEcpkInfo() {
       gatekeeper_program: 'GateF9qDULEJRgt6m1prkmUWrEXGVhDzYCgCJtGtnwu9',
       key_epoch: 7,
       key_expiry_slot: 234567890,
-      fhe_scheme: 'FHE16',
+      fhe_scheme: 'FHE16_0.0.1v',
       ir_schema_hash: '0x'.padEnd(66, 'A'),
       enc_params_schema_hash: '0x'.padEnd(66, 'B'),
       policy_schema_hash: '0x'.padEnd(66, 'C'),
@@ -93,33 +93,22 @@ export async function GET(req: NextRequest) {
     },
     links: {
       actions: [{
-        href: `${baseURL}/api/actions/job/registerCIDs?ciphertext={ciphertext}&encryption_scheme={encryption_scheme}&policy_type={policy_type}&provenance={provenance}`,
+        href: `${baseURL}/api/actions/job/registerCIDs?ciphertext={ciphertext}&policy_type={policy_type}&provenance={provenance}`,
         label: 'Register CIDs',
         parameters: [
           {
             name: 'ciphertext',
-            label: 'Encrypted Data',
+            label: 'Encrypted Data (JSON array or single value)',
             required: true,
-          },
-          {
-            name: 'encryption_scheme',
-            label: 'Encryption Scheme',
-            type: 'select',
-            required: true,
-            options: [
-              { label: 'FHE16 (Default)', value: 'fhe16', selected: true },
-              { label: 'FHE32 (High Security)', value: 'fhe32' },
-            ]
           },
           {
             name: 'policy_type',
-            label: 'Access Policy',
+            label: 'Decryption Policy',
             type: 'select',
             required: true,
             options: [
-              { label: 'Compute Only', value: 'compute', selected: true },
-              { label: 'Compute & Store', value: 'compute-store' },
-              { label: 'Full Access', value: 'full' },
+              { label: 'Owner-Controlled (Private)', value: 'owner-controlled', selected: true },
+              { label: 'Protocol-Managed (Shared)', value: 'protocol-managed' },
             ]
           },
           {
@@ -128,19 +117,19 @@ export async function GET(req: NextRequest) {
             type: 'select',
             required: false,
             options: [
-              { label: 'Client', value: 'client', selected: true },
-              { label: 'Oracle', value: 'oracle' },
-              { label: 'dApp', value: 'dapp' },
+              { label: 'Direct Owner Call', value: '1', selected: true },
+              { label: 'CPI Call', value: '0' },
             ]
           },
         ]
       }]
     },
     notes: {
-      encryption: 'Use FHE CPK to encrypt plaintext off-chain',
+      encryption: 'FHE16_0.0.1v - Use FHE CPK to encrypt plaintext off-chain',
       storage: 'Ciphertexts stored temporarily (5min TTL). Only confirmed after on-chain event.',
       receipt: 'Registration receipt issued. Monitor on-chain events for confirmation.',
-      workflow: 'POST returns tx → sign & send → on-chain event → confirmed storage'
+      workflow: 'POST returns tx → sign & send → on-chain event → confirmed storage',
+      decryption_policy: 'Owner-Controlled: Only data owner can decrypt (private). Protocol-Managed: Protocol has decryption access (shared).'
     }
   }))
 }
@@ -156,9 +145,11 @@ export async function POST(req: NextRequest) {
 
     // New simplified parameters
     const ciphertext_raw = url.searchParams.get('ciphertext') || bodyData.ciphertext
-    const encryption_scheme = url.searchParams.get('encryption_scheme') || bodyData.encryption_scheme || 'fhe16'
-    const policy_type = url.searchParams.get('policy_type') || bodyData.policy_type || 'compute'
-    const provenance_raw = url.searchParams.get('provenance') || bodyData.provenance || 'client'
+    const policy_type = url.searchParams.get('policy_type') || bodyData.policy_type || 'owner-controlled'
+    const provenance_raw = url.searchParams.get('provenance') || bodyData.provenance || '1'
+
+    // Backward compatibility: support old encryption_scheme parameter (ignored, always FHE16_0.0.1v)
+    const encryption_scheme = 'FHE16_0.0.1v'
 
     // Backward compatibility: support old parameter names (ciphertexts, enc_params, policy_ctx)
     const ciphertexts_raw = url.searchParams.get('ciphertexts') || bodyData.ciphertexts
@@ -178,21 +169,45 @@ export async function POST(req: NextRequest) {
     let ciphertexts, enc_params: EncryptionParams, policy_ctx: PolicyContext
 
     if (ciphertext_raw) {
-      // New format: convert single ciphertext to array
-      ciphertexts = [{ encrypted_data: ciphertext_raw }]
+      // New format: handle both single value and array
+      let ciphertextArray: string[]
 
-      // Map encryption_scheme to enc_params
-      enc_params = { scheme: encryption_scheme.toUpperCase() }
-
-      // Map policy_type to policy_ctx
-      const policyMap: Record<string, string[]> = {
-        'compute': ['compute'],
-        'compute-store': ['compute', 'store'],
-        'full': ['compute', 'store', 'transfer']
+      if (typeof ciphertext_raw === 'string') {
+        // Try parsing as JSON array first
+        try {
+          const parsed = JSON.parse(ciphertext_raw)
+          ciphertextArray = Array.isArray(parsed) ? parsed : [ciphertext_raw]
+        } catch {
+          // Not JSON, treat as single value
+          ciphertextArray = [ciphertext_raw]
+        }
+      } else if (Array.isArray(ciphertext_raw)) {
+        ciphertextArray = ciphertext_raw
+      } else {
+        ciphertextArray = [String(ciphertext_raw)]
       }
+
+      // Convert each ciphertext to proper format
+      ciphertexts = ciphertextArray.map(ct => ({ encrypted_data: ct }))
+
+      // Fixed encryption scheme: FHE16_0.0.1v
+      enc_params = { scheme: encryption_scheme }
+
+      // Map policy_type to policy_ctx with decryption permissions
+      const policyMap: Record<string, { allow: string[]; decrypt_by: string }> = {
+        'owner-controlled': { allow: ['compute'], decrypt_by: 'owner' },  // Private: owner only
+        'protocol-managed': { allow: ['compute', 'store'], decrypt_by: 'protocol' }, // Shared: protocol access
+        // Backward compatibility
+        'compute': { allow: ['compute'], decrypt_by: 'owner' },
+        'compute-decrypt-owner': { allow: ['compute'], decrypt_by: 'owner' },
+        'compute-store': { allow: ['compute', 'store'], decrypt_by: 'protocol' },
+        'full': { allow: ['compute', 'store', 'transfer'], decrypt_by: 'protocol' }
+      }
+      const policyConfig = policyMap[policy_type] || policyMap['owner-controlled']
       policy_ctx = {
-        allow: policyMap[policy_type] || ['compute'],
-        version: '1.0'
+        allow: policyConfig.allow,
+        version: '1.0',
+        decrypt_by: policyConfig.decrypt_by
       }
     } else if (ciphertexts_raw) {
       // Backward compatibility: parse JSON parameters

@@ -2,6 +2,8 @@
  * Pending Ciphertext Store
  * Temporary storage for ciphertexts awaiting on-chain confirmation
  * TTL: 5 minutes (auto-cleanup)
+ *
+ * Uses globalThis to ensure singleton persistence across Next.js hot reloads
  */
 
 import { createLogger } from '@/lib/logger'
@@ -26,21 +28,27 @@ interface PendingCiphertext {
 const PENDING_TTL_MS = 5 * 60 * 1000  // 5 minutes
 const CLEANUP_INTERVAL_MS = 30 * 1000  // 30 seconds
 
+// Declare global type for TypeScript
+declare global {
+  var __pendingCiphertextStore: PendingCiphertextStore | undefined
+}
+
 class PendingCiphertextStore {
-  private static instance: PendingCiphertextStore
   private pending: Map<string, PendingCiphertext>
   private cleanupTimer?: NodeJS.Timeout
 
   private constructor() {
     this.pending = new Map()
     this.startCleanupJob()
+    log.debug('PendingCiphertextStore instance created')
   }
 
   static getInstance(): PendingCiphertextStore {
-    if (!PendingCiphertextStore.instance) {
-      PendingCiphertextStore.instance = new PendingCiphertextStore()
+    // Use globalThis to persist across hot reloads
+    if (!globalThis.__pendingCiphertextStore) {
+      globalThis.__pendingCiphertextStore = new PendingCiphertextStore()
     }
-    return PendingCiphertextStore.instance
+    return globalThis.__pendingCiphertextStore
   }
 
   /**

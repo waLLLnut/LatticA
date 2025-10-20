@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-#  Lattica Gatehouse - Real-time Dashboard (ASCII-only, wrap long CIDs)
-#  - Emoji-free, ANSI-safe, perfect alignment
-#  - Shows full CID handles with robust line-wrapping
+#  Lattica Gatehouse - Enhanced Real-time Dashboard
+#  - Detailed Job Queue View for FHE Executor Interface
+#  - Recent Events Feed
 #  Usage: ./dashboard.sh [interval_seconds]
 # ==============================================================================
 
@@ -24,10 +24,10 @@ INTERVAL="${1:-2}"
 API="http://localhost:3000/api/init"
 
 # Terminal width → inner content width (between side borders)
-TERM_WIDTH="${COLUMNS:-88}"
+TERM_WIDTH="${COLUMNS:-100}"
 INNER_WIDTH=$(( TERM_WIDTH - 2 ))
-(( INNER_WIDTH < 60 )) && INNER_WIDTH=60
-(( INNER_WIDTH > 120 )) && INNER_WIDTH=120
+(( INNER_WIDTH < 80 )) && INNER_WIDTH=80
+(( INNER_WIDTH > 140 )) && INNER_WIDTH=140
 
 # --------------------------- Box helpers ---------------------------------------
 repeat_char() { local c="$1" n="$2"; printf "%0.s${c}" $(seq 1 "$n"); }
@@ -61,16 +61,12 @@ kv_line() {
 }
 
 # Soft-wrap long text into multiple box lines (ANSI-safe).
-# Usage: box_wrap "prefix" "text"
-# - prefix will be printed at the start of the first line (e.g., "  1. ")
-# - follow-up lines are indented with spaces equal to prefix length
 box_wrap() {
   local prefix="$1" text="$2"
   local indent="$(printf "%${#prefix}s" "")"
-  local space_for_text=$(( INNER_WIDTH - 2 - ${#prefix} ))  # minus side spaces
+  local space_for_text=$(( INNER_WIDTH - 2 - ${#prefix} ))
   (( space_for_text < 10 )) && space_for_text=10
 
-  # We assume text itself has no ANSI codes (CIDs/owners are plain).
   local rest="$text"
   local first=1
   while [ -n "$rest" ]; do
@@ -82,11 +78,9 @@ box_wrap() {
       fi
       break
     else
-      # Break on a word boundary if possible
       local chunk="${rest:0:$space_for_text}"
       local cut=$space_for_text
       if [[ "$chunk" =~ ^(.+)[[:space:]/:_-] ]]; then
-        # prefer to cut at the last separator/space
         cut="${#BASH_REMATCH[1]}+1"
         cut=$((cut))
         if [ $cut -lt 10 ]; then cut=$space_for_text; fi
@@ -100,6 +94,26 @@ box_wrap() {
       rest="${rest:$cut}"
     fi
   done
+}
+
+# Format timestamp
+format_time() {
+  local ts="$1"
+  if [ "$ts" = "null" ] || [ -z "$ts" ] || [ "$ts" = "0" ]; then
+    echo "-"
+  else
+    date -r "$ts" '+%H:%M:%S' 2>/dev/null || echo "$ts"
+  fi
+}
+
+# Truncate string with ellipsis
+truncate_str() {
+  local str="$1" maxlen="${2:-16}"
+  if [ ${#str} -le $maxlen ]; then
+    echo "$str"
+  else
+    echo "${str:0:$((maxlen-3))}..."
+  fi
 }
 
 # --------------------------- Render --------------------------------------------
@@ -118,40 +132,28 @@ render() {
 
   # Header
   bar_top
-  box_line "${BOLD}${CYAN}Lattica Gatehouse - Real-time Dashboard${NC}"
+  box_line "${BOLD}${CYAN}Lattica Gatehouse - FHE Executor Dashboard${NC}"
   box_line "${DIM}Updated:${NC} $NOW"
   bar_mid
 
-  # Storage
-  local STORAGE CONF PEND CAP
+  # System Overview (compact)
+  local STORAGE CONF PEND L RUN EV ERR SLOT
   STORAGE="$(printf "%s" "$DATA" | jq '.services.storage')"
   CONF="$(printf "%s" "$STORAGE" | jq -r '.confirmed_cids // 0')"
   PEND="$(printf "%s" "$STORAGE" | jq -r '.pending_cids // 0')"
-  CAP="$(printf "%s" "$STORAGE" | jq -r '.capacity // "0/10000"')"
 
-  box_line "${BOLD}${BLUE}Storage Status${NC}"
-  kv_line "  ${GREEN}Confirmed${NC}" "$CONF"
-  kv_line "  ${YELLOW}Pending${NC}"   "$PEND"
-  kv_line "  ${DIM}Capacity${NC}"  "$CAP"
-  bar_mid
-
-  # Event Listener
-  local L RUN EV ERR SLOT
   L="$(printf "%s" "$DATA" | jq '.services.event_listener')"
   RUN="$(printf "%s" "$L" | jq -r '.is_running // false')"
   EV="$(printf "%s" "$L" | jq -r '.total_events_processed // 0')"
   ERR="$(printf "%s" "$L" | jq -r '.errors_count // 0')"
   SLOT="$(printf "%s" "$L" | jq -r '.last_processed_slot // 0')"
 
-  box_line "${BOLD}${MAGENTA}Event Listener${NC}"
-  kv_line "  Status" "$( [ "$RUN" = true ] && echo "${GREEN}Running${NC}" || echo "${RED}Stopped${NC}" )"
-  kv_line "  Events processed" "$EV"
-  kv_line "  Errors" "$ERR"
-  kv_line "  Last slot" "$SLOT"
+  box_line "${BOLD}${BLUE}System Status${NC}"
+  box_line "  CIDs: ${GREEN}$CONF confirmed${NC}, ${YELLOW}$PEND pending${NC}  |  Listener: $( [ "$RUN" = true ] && echo "${GREEN}Running${NC}" || echo "${RED}Stopped${NC}" ) ($EV events, $ERR errors)"
   bar_mid
 
-  # Job Queue
-  local Q QD EX CM FL TJ
+  # Job Queue Details
+  local Q QD EX CM FL TJ JOBS
   Q="$(printf "%s" "$DATA" | jq '.services.job_queue')"
   QD="$(printf "%s" "$Q" | jq -r '.queued // 0')"
   EX="$(printf "%s" "$Q" | jq -r '.executing // 0')"
@@ -159,57 +161,124 @@ render() {
   FL="$(printf "%s" "$Q" | jq -r '.failed // 0')"
   TJ="$(printf "%s" "$Q" | jq -r '.total_jobs // 0')"
 
-  box_line "${BOLD}${YELLOW}Job Queue${NC}"
-  kv_line "  Total" "$TJ"
-  box_line "  Queued: $QD   Executing: $EX   Completed: $CM   Failed: $FL"
+  box_line "${BOLD}${YELLOW}Job Queue${NC} ${DIM}(FHE Executor Interface)${NC}"
+  box_line "  Total: $TJ  |  ${YELLOW}Queued: $QD${NC}  |  ${CYAN}Executing: $EX${NC}  |  ${GREEN}Completed: $CM${NC}  |  ${RED}Failed: $FL${NC}"
+
+  # Detailed Job List - ALL jobs (queued, executing, completed, failed)
+  JOBS="$(printf "%s" "$Q" | jq -r '.jobs[]? | "\(.job_pda)|\(.status)|\(.cid_count)|\(.ir_digest)|\(.operation)|\(.operation_desc)|\(.queued_at)|\(.slot)|\(.executor // "none")|\(.execution_started_at // 0)|\(.execution_completed_at // 0)"')"
+
+  if [ -n "$JOBS" ] && [ "$JOBS" != "null" ]; then
+    bar_mid
+    box_line "${BOLD}${CYAN}All Jobs (Recent Activity)${NC}"
+
+    local i=0
+    while IFS='|' read -r job_pda status cid_count ir_digest operation operation_desc queued_at slot executor exec_start exec_end; do
+      [ -z "${job_pda:-}" ] || [ "$job_pda" = "null" ] && continue
+      i=$((i+1))
+
+      # Status color & uppercase (POSIX-compatible)
+      local status_color="$YELLOW"
+      local status_upper
+      status_upper="$(echo "$status" | tr '[:lower:]' '[:upper:]')"
+
+      case "$status" in
+        queued) status_color="$YELLOW" ;;
+        assigned) status_color="$BLUE" ;;
+        executing) status_color="$CYAN" ;;
+        completed) status_color="$GREEN" ;;
+        failed) status_color="$RED" ;;
+      esac
+
+      # Operation type display with color coding (capitalize first letter)
+      local operation_display="" operation_desc_display=""
+      local operation_capitalized
+      operation_capitalized="$(echo "$operation" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')"
+
+      case "$operation" in
+        deposit)
+          operation_display="${GREEN}${operation_capitalized}${NC}"
+          ;;
+        withdraw)
+          operation_display="${YELLOW}${operation_capitalized}${NC}"
+          ;;
+        borrow)
+          operation_display="${CYAN}${operation_capitalized}${NC}"
+          ;;
+        liquidation)
+          operation_display="${RED}${operation_capitalized}${NC}"
+          ;;
+        *)
+          operation_display="${MAGENTA}${operation_capitalized}${NC}"
+          ;;
+      esac
+
+      operation_desc_display="${DIM}FHE: ${operation_desc}${NC}"
+
+      # Timeline
+      local timeline=""
+      if [ "$status" = "completed" ] || [ "$status" = "failed" ]; then
+        timeline="Queued→Exec→Done: $(format_time "$queued_at") → $(format_time "$exec_start") → $(format_time "$exec_end")"
+      elif [ "$status" = "executing" ] || [ "$status" = "assigned" ]; then
+        timeline="Queued→Exec: $(format_time "$queued_at") → $(format_time "$exec_start")"
+      else
+        timeline="Queued: $(format_time "$queued_at")"
+      fi
+
+      box_line ""
+      box_line "  ${BOLD}Job #$i${NC}  [${status_color}${status_upper}${NC}]  Operation: ${operation_display}"
+      box_wrap "    " "PDA: $(truncate_str "$job_pda" 60)"
+      box_line "    CIDs: $cid_count  |  IR Digest: $(truncate_str "$ir_digest" 24)"
+      box_line "    ${operation_desc_display}"
+      box_line "    Executor: $(truncate_str "$executor" 30)"
+      box_line "    Timeline: ${DIM}${timeline}${NC}"
+    done <<< "$JOBS"
+
+    if [ $i -eq 0 ]; then
+      box_line "  ${DIM}No jobs yet${NC}"
+    fi
+  else
+    box_line "  ${DIM}No jobs in queue${NC}"
+  fi
+
   bar_mid
 
-  # Recently Confirmed CIDs — FULL handles with wrapping
+  # Recent Events (last 3)
+  box_line "${BOLD}${MAGENTA}Recent On-Chain Events${NC}"
+  box_line "  ${DIM}Last slot processed:${NC} $SLOT"
+  box_line "  ${DIM}Total events:${NC} $EV  ${DIM}|${NC}  ${RED}Errors:${NC} $ERR"
+
+  # Show recent CIDs as proxy for events
   if [ "$CONF" -gt 0 ]; then
-    box_line "${BOLD}${GREEN}Recently Confirmed CIDs${NC} ${DIM}(latest 5)${NC}"
+    box_line ""
+    box_line "  ${DIM}Latest CID Registrations:${NC}"
     local CIDS i=0
-    CIDS="$(printf "%s" "$DATA" | jq -r '.services.storage.recent_cids[]? | "\(.cid_pda)|\(.owner)"' | head -5)"
+    CIDS="$(printf "%s" "$DATA" | jq -r '.services.storage.recent_cids[]? | "\(.cid_pda)|\(.created_at)"' | head -3)"
     if [ -n "$CIDS" ]; then
-      while IFS='|' read -r cid owner; do
+      while IFS='|' read -r cid created_at; do
         [ -z "${cid:-}" ] && continue
         i=$((i+1))
-        box_wrap "  $i. " "CID PDA: ${cid}"
-        box_wrap "     "  "Owner : ${owner}"
+        box_line "    $i. $(truncate_str "$cid" 48)  ${DIM}$(format_time "$created_at")${NC}"
       done <<< "$CIDS"
-    else
-      box_line "  (no CIDs)"
     fi
-    box_line "${DIM}Use these CID PDAs for job submission${NC}"
-    bar_mid
   fi
 
-  # System Health
-  local STATUS MSG
-  STATUS="${GREEN}Healthy${NC}"; MSG="All systems operational"
-  if [ "$RUN" != "true" ]; then
-    STATUS="${RED}Critical${NC}"; MSG="Event Listener stopped"
-  elif [ "$ERR" -gt 0 ]; then
-    STATUS="${YELLOW}Warning${NC}"; MSG="Errors detected"
-  elif [ "$FL" -gt 0 ]; then
-    STATUS="${YELLOW}Warning${NC}"; MSG="Some jobs failed"
-  fi
-
-  box_line "${BOLD}${CYAN}System Health${NC}"
-  kv_line "  Status" "$STATUS"
-  box_line "  $MSG"
   bar_bottom
 
-  # Footer
-  printf "%sPress %sCtrl+C%s to exit | Refresh %ss | API: %s%s\n" \
-    "$DIM" "$BOLD" "$NC" "$INTERVAL" "$API" "$NC"
+  # Footer - FHE Executor Instructions
+  printf "%s${BOLD}FHE Executor Interface:${NC}\n" "$CYAN"
+  printf "%s  1. Monitor 'Active Jobs' section above for queued jobs\n" "$DIM"
+  printf "  2. Fetch job details: GET /api/init (see job_pda, ir_digest, cid_handles)\n"
+  printf "  3. Execute FHE computation on CID data\n"
+  printf "  4. Submit result back via API (TODO: implement result submission endpoint)%s\n\n" "$NC"
+
+  printf "%sPress %sCtrl+C%s to exit | Refresh %ss%s\n" "$DIM" "$BOLD" "$NC" "$INTERVAL" "$NC"
   printf "%sRegister CID:%s https://www.blinks.xyz/inspector?url=http://localhost:3000/api/actions/job/registerCIDs\n" "$CYAN" "$NC"
   printf "%sSubmit Job:%s   https://www.blinks.xyz/inspector?url=http://localhost:3000/api/actions/job/submit\n" "$CYAN" "$NC"
-  printf "%sView DAG:%s     curl http://localhost:3000/api/actions/batch/plan | jq\n" "$CYAN" "$NC"
 }
 
 # --------------------------- Main Loop -----------------------------------------
 trap 'printf "\n%sDashboard stopped.%s\n" "$CYAN" "$NC"; exit 0' INT
-printf "%s%sStarting Lattica Gatehouse Dashboard...%s\n" "$CYAN" "$BOLD" "$NC"
+printf "%s%sStarting Lattica Gatehouse FHE Executor Dashboard...%s\n" "$CYAN" "$BOLD" "$NC"
 printf "%s(Terminal width: %d cols)%s\n\n" "$DIM" "$INNER_WIDTH" "$NC"
 
 while true; do
