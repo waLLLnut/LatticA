@@ -10,8 +10,15 @@ import {
   SystemProgram,
   Connection,
 } from '@solana/web3.js'
-import crypto from 'crypto'
+import { createLogger } from '@/lib/logger'
+import { pendingCiphertextStore } from '@/services/storage/pending-store'
+import { ciphertextStore } from '@/services/storage/ciphertext-store'
+import { registrationLog } from '@/services/storage/registration-log'
+import { sha256Hex, hex32, canonicalJson, calcDomainHash } from '@/lib/crypto-utils'
+import { getInstructionDiscriminator } from '@/lib/anchor-utils'
+import type { EncryptionParams, PolicyContext } from '@/types/ciphertext'
 
+const log = createLogger('API:RegisterCIDs')
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed')
 const MAX_CIDS = 16
 
@@ -47,78 +54,183 @@ function getFHEcpkInfo() {
   }
 }
 
-// Hash utilities
-function sha256Hex(b: Buffer | string): string {
-  const buf = typeof b === 'string' ? Buffer.from(b) : b
-  return '0x' + crypto.createHash('sha256').update(buf).digest('hex')
-}
-
-function hex32(h0x: string): Buffer {
-  const h = h0x.startsWith('0x') ? h0x.slice(2) : h0x
-  if (h.length !== 64) throw new Error('Expected 32-byte hex string')
-  return Buffer.from(h, 'hex')
-}
-
-function canonicalJson(o: unknown): string {
-  return JSON.stringify(o, Object.keys(o as Record<string, unknown>).sort())
-}
-
-export async function GET() {
+export async function GET(req: NextRequest) {
   const fhe = getFHEcpkInfo()
+  const domain_hash = calcDomainHash({
+    chain_id: fhe.domain.chain_id,
+    gatekeeper_program: fhe.domain.gatekeeper_program,
+    cpk_id: fhe.cpk_id,
+    key_epoch: fhe.domain.key_epoch,
+  })
+  
   const fhe_cpk = {
     cpk_id: fhe.cpk_id,
     public_key: fhe.cpk_pub,
-    domain_hash: sha256Hex(Buffer.concat([
-      Buffer.from(fhe.domain.chain_id, 'utf8'),
-      Buffer.from(fhe.domain.gatekeeper_program, 'utf8'),
-      Buffer.from(fhe.cpk_id, 'utf8'),
-      Buffer.from(String(fhe.domain.key_epoch), 'utf8'),
-    ])),
+    domain_hash,
     key_epoch: fhe.domain.key_epoch,
     scheme: fhe.domain.fhe_scheme,
   }
+
+  // Get storage stats for monitoring
+  const confirmedStats = ciphertextStore.get_stats()
+  const pendingStats = pendingCiphertextStore.get_stats()
+  
+  // Generate dynamic base URL
+  const baseURL = new URL(req.url).origin
   
   return cors(NextResponse.json({
     type: 'action',
-    icon: 'http://localhost:3000/logo.png',
+    icon: new URL('/logo.png', baseURL).toString(),
     title: 'Gatekeeper · Register CID Handles',
     description: 'Register client-encrypted ciphertexts as on-chain Content Identifiers.',
     label: 'Register CIDs',
     fhe_cpk,
+    storage_stats: {
+      confirmed_cids: confirmedStats.confirmed_count,
+      pending_cids: pendingStats.total_pending,
+      total_cids: confirmedStats.total_cids,
+      capacity: `${confirmedStats.total_cids}/10000`,
+    },
     links: {
       actions: [{
-        type: 'post',
-        href: '/api/actions/job/registerCIDs',
+        href: `${baseURL}/api/actions/job/registerCIDs?ciphertext={ciphertext}&encryption_scheme={encryption_scheme}&policy_type={policy_type}&provenance={provenance}`,
         label: 'Register CIDs',
         parameters: [
-          { name: 'ciphertexts', label: 'Ciphertexts (JSON)', required: true, type: 'textarea' },
-          { name: 'enc_params', label: 'Encryption Params (JSON)', required: true, type: 'textarea' },
-          { name: 'policy_ctx', label: 'Policy Context (JSON)', required: true, type: 'textarea' },
-          { name: 'provenance', label: 'Provenance', required: false, type: 'text' },
+          {
+            name: 'ciphertext',
+            label: 'Encrypted Data',
+            required: true,
+          },
+          {
+            name: 'encryption_scheme',
+            label: 'Encryption Scheme',
+            type: 'select',
+            required: true,
+            options: [
+              { label: 'FHE16 (Default)', value: 'fhe16', selected: true },
+              { label: 'FHE32 (High Security)', value: 'fhe32' },
+            ]
+          },
+          {
+            name: 'policy_type',
+            label: 'Access Policy',
+            type: 'select',
+            required: true,
+            options: [
+              { label: 'Compute Only', value: 'compute', selected: true },
+              { label: 'Compute & Store', value: 'compute-store' },
+              { label: 'Full Access', value: 'full' },
+            ]
+          },
+          {
+            name: 'provenance',
+            label: 'Data Source',
+            type: 'select',
+            required: false,
+            options: [
+              { label: 'Client', value: 'client', selected: true },
+              { label: 'Oracle', value: 'oracle' },
+              { label: 'dApp', value: 'dapp' },
+            ]
+          },
         ]
       }]
     },
     notes: {
       encryption: 'Use FHE CPK to encrypt plaintext off-chain',
-      storage: 'Ciphertexts stored off-chain (IPFS/Arweave), CID handles on-chain',
-      receipt: 'Signed registration receipt issued for auditability'
+      storage: 'Ciphertexts stored temporarily (5min TTL). Only confirmed after on-chain event.',
+      receipt: 'Registration receipt issued. Monitor on-chain events for confirmation.',
+      workflow: 'POST returns tx → sign & send → on-chain event → confirmed storage'
     }
   }))
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { account } = body
-    const ciphertexts = typeof body.ciphertexts === 'string' ? JSON.parse(body.ciphertexts) : body.ciphertexts
-    const enc_params = typeof body.enc_params === 'string' ? JSON.parse(body.enc_params) : body.enc_params
-    const policy_ctx = typeof body.policy_ctx === 'string' ? JSON.parse(body.policy_ctx) : body.policy_ctx
-    const provenance = body.provenance || 'client'
+    const rawBody = await req.json()
+    const url = new URL(req.url)
+
+    // Get parameters from either query params (Blinks Inspector) or body (Dial.to)
+    const bodyData = rawBody.data || rawBody
+    const account = rawBody.account
+
+    // New simplified parameters
+    const ciphertext_raw = url.searchParams.get('ciphertext') || bodyData.ciphertext
+    const encryption_scheme = url.searchParams.get('encryption_scheme') || bodyData.encryption_scheme || 'fhe16'
+    const policy_type = url.searchParams.get('policy_type') || bodyData.policy_type || 'compute'
+    const provenance_raw = url.searchParams.get('provenance') || bodyData.provenance || 'client'
+
+    // Backward compatibility: support old parameter names (ciphertexts, enc_params, policy_ctx)
+    const ciphertexts_raw = url.searchParams.get('ciphertexts') || bodyData.ciphertexts
+    const enc_params_raw = url.searchParams.get('enc_params') || bodyData.enc_params
+    const policy_ctx_raw = url.searchParams.get('policy_ctx') || bodyData.policy_ctx
+
+    // Debug logging
+    log.info('POST request received', {
+      body_keys: Object.keys(rawBody),
+      query_params: Array.from(url.searchParams.keys()),
+      account: account ? 'present' : 'missing',
+      has_nested_data: !!rawBody.data,
+      source: url.searchParams.has('ciphertext') ? 'query_params' : 'body',
+    })
+
+    // Convert simplified parameters to internal format
+    let ciphertexts, enc_params: EncryptionParams, policy_ctx: PolicyContext
+
+    if (ciphertext_raw) {
+      // New format: convert single ciphertext to array
+      ciphertexts = [{ encrypted_data: ciphertext_raw }]
+
+      // Map encryption_scheme to enc_params
+      enc_params = { scheme: encryption_scheme.toUpperCase() }
+
+      // Map policy_type to policy_ctx
+      const policyMap: Record<string, string[]> = {
+        'compute': ['compute'],
+        'compute-store': ['compute', 'store'],
+        'full': ['compute', 'store', 'transfer']
+      }
+      policy_ctx = {
+        allow: policyMap[policy_type] || ['compute'],
+        version: '1.0'
+      }
+    } else if (ciphertexts_raw) {
+      // Backward compatibility: parse JSON parameters
+      try {
+        ciphertexts = typeof ciphertexts_raw === 'string' ? JSON.parse(ciphertexts_raw) : ciphertexts_raw
+        enc_params = typeof enc_params_raw === 'string' ? JSON.parse(enc_params_raw) : enc_params_raw
+        policy_ctx = typeof policy_ctx_raw === 'string' ? JSON.parse(policy_ctx_raw) : policy_ctx_raw
+      } catch {
+        return cors(NextResponse.json({
+          message: 'Invalid JSON in parameters (ciphertexts, enc_params, or policy_ctx)'
+        }, { status: 400 }))
+      }
+    } else {
+      return cors(NextResponse.json({
+        message: 'Missing ciphertext parameter'
+      }, { status: 400 }))
+    }
+
+    const provenance = provenance_raw
 
     // Validation
     if (!account || !ciphertexts || !enc_params || !policy_ctx) {
+      log.error('Validation failed', {
+        account: !!account,
+        ciphertexts: !!ciphertexts,
+        enc_params: !!enc_params,
+        policy_ctx: !!policy_ctx,
+      })
       return cors(NextResponse.json({
-        message: 'Missing required fields: account, ciphertexts, enc_params, policy_ctx'
+        message: 'Missing required fields: account, ciphertexts, enc_params, policy_ctx',
+        debug: {
+          received_keys: Object.keys(rawBody),
+          has_nested_data: !!rawBody.data,
+          account_present: !!account,
+          ciphertexts_present: !!ciphertexts,
+          enc_params_present: !!enc_params,
+          policy_ctx_present: !!policy_ctx,
+        }
       }, { status: 400 }))
     }
 
@@ -133,11 +245,11 @@ export async function POST(req: NextRequest) {
     const owner = new PublicKey(account)
     const fhe = getFHEcpkInfo()
     const gatekeeperProgram = new PublicKey(fhe.domain.gatekeeper_program)
-    const policy_hash = sha256Hex(Buffer.from(canonicalJson(policy_ctx), 'utf8'))
+    const policy_hash = sha256Hex(canonicalJson(policy_ctx))
 
     // Hash ciphertexts and derive CID PDAs
     const cids = ciphertexts.map((ct: unknown) => {
-      const ciphertext_hash = sha256Hex(Buffer.from(canonicalJson(ct), 'utf8'))
+      const ciphertext_hash = sha256Hex(canonicalJson(ct))
       const storage_ref = 'ipfs://Qm' + ciphertext_hash.slice(4, 50)
 
       const [cidPda] = PublicKey.findProgramAddressSync(
@@ -149,16 +261,50 @@ export async function POST(req: NextRequest) {
         cid_pda: cidPda.toBase58(),
         ciphertext_hash,
         policy_hash,
-        storage_ref
+        storage_ref,
+        ciphertext: ct,
       }
     })
 
-    // Build register_cid instructions
-    const registerDiscriminator = crypto
-      .createHash('sha256')
-      .update('global:register_cid')
-      .digest()
-      .subarray(0, 8)
+    // Store ciphertexts in PendingStore (not confirmed yet!)
+    try {
+      for (const cid of cids) {
+        pendingCiphertextStore.store_temporary(
+          cid.cid_pda,
+          cid.ciphertext,
+          cid.ciphertext_hash,
+          enc_params,
+          policy_ctx,
+          policy_hash,
+          owner.toBase58(),
+          cid.storage_ref,
+          provenance,
+        )
+      }
+    } catch (storageError) {
+      log.error('Pending storage error', storageError)
+      return cors(NextResponse.json({
+        message: storageError instanceof Error ? storageError.message : 'Storage error',
+      }, { status: 500 }))
+    }
+
+    // Create registration log entry
+    const registration = registrationLog.create_registration(
+      cids.map(c => c.cid_pda),
+      cids.map(c => c.ciphertext_hash),
+      cids.map(() => policy_hash),
+      owner.toBase58(),
+      {
+        chain_id: fhe.domain.chain_id,
+        gatekeeper_program: fhe.domain.gatekeeper_program,
+        cpk_id: fhe.cpk_id,
+        key_epoch: fhe.domain.key_epoch,
+      }
+    )
+
+    // Build register_cid_handle instructions
+    // Use IDL discriminator (never calculate manually!)
+    const registerDiscriminator = getInstructionDiscriminator('register_cid_handle')
 
     const instructions = cids.map(({ cid_pda, ciphertext_hash }) => {
       const data = Buffer.concat([
@@ -178,6 +324,8 @@ export async function POST(req: NextRequest) {
     })
 
     // Build transaction with recent blockhash
+    // Use 'confirmed' instead of 'finalized' for fresher blockhash (Blinks best practice)
+    // This prevents blockhash expiry during user signing on Dial.to
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
     const tx = new Transaction()
     tx.feePayer = owner
@@ -185,39 +333,80 @@ export async function POST(req: NextRequest) {
     tx.lastValidBlockHeight = lastValidBlockHeight
     tx.add(...instructions)
 
+    // Serialize transaction
+    // IMPORTANT: Use verifySignatures: false since we don't have user's signature yet
     const serializedTx = tx.serialize({
       requireAllSignatures: false,
       verifySignatures: false,
     })
 
-    // Build registration receipt
-    const receipt = {
-      reg_id: `RID-${Math.floor(Date.now() / 1000)}-${crypto.randomBytes(4).toString('hex')}`,
-      cids,
-      enc_params,
-      policy_ctx,
-      provenance,
-      domain: {
-        chain_id: fhe.domain.chain_id,
-        gatekeeper_program: fhe.domain.gatekeeper_program,
-        cpk_id: fhe.cpk_id,
-        key_epoch: fhe.domain.key_epoch,
-      },
-      created_at: Math.floor(Date.now() / 1000)
+    // Log transaction details for debugging
+    log.info('Transaction details', {
+      feePayer: owner.toBase58(),
+      blockhash: blockhash.slice(0, 8) + '...',
+      instructions: instructions.length,
+      accounts_per_ix: instructions[0]?.keys.length || 0,
+      cid_pdas: cids.map(c => c.cid_pda.slice(0, 8) + '...'),
+    })
+
+    // Simulate transaction to catch errors early
+    let simulationResult: { success: boolean; error?: any; logs?: string[] } = { success: false }
+    try {
+      const simulation = await connection.simulateTransaction(tx)
+      if (simulation.value.err) {
+        // Log with better error formatting
+        console.error('=== SIMULATION ERROR DETAILS ===')
+        console.error('Error object:', simulation.value.err)
+        console.error('Error JSON:', JSON.stringify(simulation.value.err))
+        console.error('Logs:', simulation.value.logs)
+        console.error('================================')
+
+        log.error('Transaction simulation failed', {
+          error: JSON.stringify(simulation.value.err, null, 2),
+          logs: simulation.value.logs,
+        })
+        simulationResult = {
+          success: false,
+          error: simulation.value.err,
+          logs: simulation.value.logs || [],
+        }
+
+        // Return error immediately if simulation fails
+        return cors(NextResponse.json({
+          message: 'Transaction simulation failed. This transaction will likely fail on-chain.',
+          error: simulation.value.err,
+          logs: simulation.value.logs,
+          hint: 'Common causes: Program not initialized (missing config PDA), insufficient SOL balance, or invalid instruction data',
+          troubleshooting: {
+            check_balance: `Ensure ${owner.toBase58()} has sufficient SOL (>0.01 SOL)`,
+            check_program: `Program ${gatekeeperProgram.toBase58()} must be initialized`,
+            cid_pdas: cids.map(c => c.cid_pda),
+          }
+        }, { status: 400 }))
+      } else {
+        log.info('Transaction simulation successful', {
+          units_consumed: simulation.value.unitsConsumed,
+        })
+        simulationResult = { success: true }
+      }
+    } catch (simError) {
+      log.warn('Simulation check failed (non-fatal)', simError)
+      // Continue anyway - some valid txs fail simulation
     }
 
-    const nextHref = `/api/actions/job/submit?cids=${encodeURIComponent(JSON.stringify(cids.map(c => c.cid_pda)))}`
+    log.info('Created pending registration', {
+      reg_id: registration.reg_id.slice(0, 8) + '...',
+      cids: cids.length
+    })
 
+    // Standard Solana Actions response format
+    // Keep it minimal for better Dial.to compatibility
     return cors(NextResponse.json({
       transaction: Buffer.from(serializedTx).toString('base64'),
-      message: `Register ${cids.length} CID handle(s) on-chain`,
-      receipt,
-      cids,
-      links: { next: { type: 'post', href: nextHref } },
-      note: 'After signing and sending this transaction, use the CID PDAs in /api/actions/job/submit'
+      message: `Successfully registered ${cids.length} CID handle(s)`,
     }))
   } catch (e: unknown) {
-    console.error('Register CIDs error:', e)
+    log.error('Register CIDs error', e)
     return cors(NextResponse.json({
       message: e instanceof Error ? e.message : 'Internal server error',
       details: e instanceof Error ? e.stack : String(e)

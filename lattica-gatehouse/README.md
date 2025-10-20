@@ -24,8 +24,11 @@ npm run dev
 ### Run Integration Tests
 
 ```bash
-# Test all 5 phases with validation
+# Test all 5 phases with validation (API only)
 ./test-all-phases.sh
+
+# Test real workflow with EventListener & JobQueue
+./test-real-workflow.sh
 ```
 
 ---
@@ -47,6 +50,42 @@ npm run dev
 - **KMS**: Threshold decryption (t-of-n distributed key management)
 - **Executors**: Offchain FHE16 computation nodes
 - **Offchain Storage**: ciphertext storage
+
+---
+
+## 🎯 Demo Workflow with Phantom Wallet
+
+### End-to-End Test Scenario
+
+**Goal**: Test the complete workflow from Job submission to DAG-based execution planning.
+
+1. **Start Server**
+   ```bash
+   npm run dev
+   # EventListener starts automatically via instrumentation.ts
+   ```
+
+2. **Register CIDs** (using dial.to + Phantom)
+   ```
+   https://dial.to/?action=solana-action:http://localhost:3000/api/actions/job/registerCIDs
+   ```
+
+3. **Submit Job** (using dial.to + Phantom)
+   ```
+   https://dial.to/?action=solana-action:http://localhost:3000/api/actions/job/submit
+   ```
+
+4. **Monitor EventListener** (automatic)
+   - EventListener catches `JobSubmitted` event
+   - Job moves from pending → JobQueue (queued)
+   - Check logs for: `[EventListener] Job enqueued for execution`
+
+5. **Query DAG Plan** (real JobQueue data)
+   ```bash
+   curl http://localhost:3000/api/actions/batch/plan | jq
+   ```
+
+**See detailed guide**: [DEMO_WORKFLOW.md](./DEMO_WORKFLOW.md)
 
 ---
 

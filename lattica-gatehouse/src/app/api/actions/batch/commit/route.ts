@@ -11,9 +11,11 @@ import {
   SystemProgram,
   Connection,
 } from '@solana/web3.js'
-import crypto from 'crypto'
 import BN from 'bn.js'
+import { getInstructionDiscriminator } from '@/lib/anchor-utils'
+import { createLogger } from '@/lib/logger'
 
+const log = createLogger('API:BatchCommit')
 const connection = new Connection('https://api.devnet.solana.com', 'confirmed')
 
 function setCors(res: NextResponse) {
@@ -46,11 +48,9 @@ function hex32(h0x: string): Buffer {
 }
 
 // Anchor discriminator for commit_batch instruction
-const COMMIT_BATCH_DISCRIMINATOR = crypto
-  .createHash('sha256')
-  .update('global:commit_batch')
-  .digest()
-  .subarray(0, 8)
+// Extracted from IDL (never calculate manually!)
+// @see src/idl/lattica_gatekeeper.json line 11-24
+const COMMIT_BATCH_DISCRIMINATOR = getInstructionDiscriminator('commit_batch')
 
 function deriveBatchPda(programId: PublicKey, windowStartSlot: number): PublicKey {
   const slotBytes = Buffer.alloc(8)
@@ -97,20 +97,22 @@ function buildCommitBatchInstruction(args: {
   })
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const fhe = getFHEcpkInfo()
+  
+  // Generate dynamic base URL
+  const baseURL = new URL(req.url).origin
 
   return setCors(NextResponse.json({
     type: 'action',
-    icon: 'http://localhost:3000/logo.png',
+    icon: new URL('/logo.png', baseURL).toString(),
     title: 'Gatekeeper · Commit Batch',
     description: 'Commit batch execution results with merkle root (optimistic)',
     label: 'Commit Batch',
     challenge_window_slots: fhe.domain.challenge_window_slots,
     links: {
       actions: [{
-        type: 'post',
-        href: '/api/actions/batch/commit',
+        href: `${baseURL}/api/actions/batch/commit?window_start_slot={window_start_slot}&commit_root={commit_root}&result_commitment={result_commitment}&processed_until_slot={processed_until_slot}`,
         label: 'Commit Batch',
         parameters: [
           { name: 'window_start_slot', label: 'Window Start Slot', required: true, type: 'number' },
@@ -130,8 +132,24 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { account, window_start_slot, commit_root, result_commitment, processed_until_slot } = body
+    const rawBody = await req.json()
+    const url = new URL(req.url)
+
+    // Blinks sends data in nested "data" object, account at top level
+    const bodyData = rawBody.data || rawBody
+    const account = rawBody.account
+
+    // Try query params first, then fall back to body
+    const window_start_slot_raw = url.searchParams.get('window_start_slot') || bodyData.window_start_slot
+    const commit_root_raw = url.searchParams.get('commit_root') || bodyData.commit_root
+    const result_commitment_raw = url.searchParams.get('result_commitment') || bodyData.result_commitment
+    const processed_until_slot_raw = url.searchParams.get('processed_until_slot') || bodyData.processed_until_slot
+
+    // Parse numeric values
+    const window_start_slot = window_start_slot_raw ? parseInt(String(window_start_slot_raw), 10) : undefined
+    const commit_root = commit_root_raw
+    const result_commitment = result_commitment_raw
+    const processed_until_slot = processed_until_slot_raw ? parseInt(String(processed_until_slot_raw), 10) : undefined
 
     // Validation
     if (!account || window_start_slot === undefined || !commit_root || !result_commitment || processed_until_slot === undefined) {
@@ -199,15 +217,9 @@ export async function POST(req: NextRequest) {
         processed_until_slot,
         challenge_window_slots: fhe.domain.challenge_window_slots,
       },
-      links: {
-        next: {
-          type: 'get',
-          href: `/api/actions/batch/challenge_leaf?commit_id=${batchPda.toBase58()}`,
-        },
-      },
     }))
   } catch (e: unknown) {
-    console.error('Batch commit error:', e)
+    log.error('Batch commit error', e)
     return setCors(NextResponse.json({
       message: e instanceof Error ? e.message : 'Internal server error',
       details: e instanceof Error ? e.stack : String(e)

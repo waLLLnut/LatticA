@@ -4,7 +4,10 @@
  * Phase 4: Challenge & Verification
  */
 import { NextRequest, NextResponse } from 'next/server'
+import { createLogger } from '@/lib/logger'
 import crypto from 'crypto'
+
+const log = createLogger('API:ChallengeLeaf')
 
 function setCors(res: NextResponse) {
   res.headers.set('Access-Control-Allow-Origin', '*')
@@ -18,7 +21,21 @@ export async function OPTIONS() {
 }
 
 // In-memory mock store for challenges (production would use database)
-const challenges = new Map<string, any>()
+interface Challenge {
+  commit_id: string
+  leaf_idx: number
+  d_conflict: string
+  merkle_proof: string[]
+  status: string
+  opened_at: string
+  verifiers: string[]
+  attestations?: Array<{ verifier_id: string; digest: string }>
+  accepted_digest?: string
+  new_result_root?: string
+  resolved_at?: string
+}
+
+const challenges = new Map<string, Challenge>()
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
@@ -31,9 +48,12 @@ export async function GET(request: NextRequest) {
     challenge_status = challenges.get(challengeKey) || { status: 'No challenge' }
   }
 
+  // Generate dynamic base URL
+  const baseURL = new URL(request.url).origin
+
   return setCors(NextResponse.json({
     type: 'action',
-    icon: 'http://localhost:3000/logo.png',
+    icon: new URL('/logo.png', baseURL).toString(),
     title: 'Gatekeeper · Challenge Leaf',
     description: 'Open challenge for specific batch result leaf',
     label: 'Challenge Leaf',
@@ -42,14 +62,13 @@ export async function GET(request: NextRequest) {
     }),
     links: {
       actions: [{
-        type: 'post',
-        href: '/api/actions/batch/challenge_leaf',
+        href: `${baseURL}/api/actions/batch/challenge_leaf?commit_id={commit_id}&leaf_idx={leaf_idx}&d_conflict={d_conflict}&merkle_proof={merkle_proof}`,
         label: 'Open Challenge',
         parameters: [
-          { name: 'commit_id', label: 'Commit ID (Batch PDA)', required: true, type: 'text' },
+          { name: 'commit_id', label: 'Commit ID (Batch PDA)', required: true },
           { name: 'leaf_idx', label: 'Leaf Index', required: true, type: 'number' },
           { name: 'd_conflict', label: 'Conflicting Digest (0x...64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
-          { name: 'merkle_proof', label: 'Merkle Proof (JSON array)', required: true, type: 'textarea' },
+          { name: 'merkle_proof', label: 'Merkle Proof (JSON array)', required: true },
         ],
       }],
     },
@@ -63,8 +82,23 @@ export async function GET(request: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { commit_id, leaf_idx, d_conflict, merkle_proof } = body
+    const rawBody = await req.json()
+    const url = new URL(req.url)
+
+    // Blinks sends data in nested "data" object, account at top level (though not used in challenge)
+    const bodyData = rawBody.data || rawBody
+
+    // Try query params first, then fall back to body
+    const commit_id_raw = url.searchParams.get('commit_id') || bodyData.commit_id
+    const leaf_idx_raw = url.searchParams.get('leaf_idx') || bodyData.leaf_idx
+    const d_conflict_raw = url.searchParams.get('d_conflict') || bodyData.d_conflict
+    const merkle_proof_raw = url.searchParams.get('merkle_proof') || bodyData.merkle_proof
+
+    // Parse numeric values
+    const commit_id = commit_id_raw
+    const leaf_idx = leaf_idx_raw ? parseInt(String(leaf_idx_raw), 10) : undefined
+    const d_conflict = d_conflict_raw
+    const merkle_proof = merkle_proof_raw
 
     // Validation
     if (!commit_id || leaf_idx === undefined || !d_conflict || !merkle_proof) {
@@ -79,9 +113,17 @@ export async function POST(req: NextRequest) {
       }, { status: 400 }))
     }
 
-    const parsedMerkleProof = typeof merkle_proof === 'string'
-      ? JSON.parse(merkle_proof)
-      : merkle_proof
+    // Parse JSON parameters with error handling
+    let parsedMerkleProof
+    try {
+      parsedMerkleProof = typeof merkle_proof === 'string'
+        ? JSON.parse(merkle_proof)
+        : merkle_proof
+    } catch {
+      return setCors(NextResponse.json({
+        message: 'Invalid JSON in merkle_proof parameter'
+      }, { status: 400 }))
+    }
 
     if (!Array.isArray(parsedMerkleProof)) {
       return setCors(NextResponse.json({
@@ -91,7 +133,7 @@ export async function POST(req: NextRequest) {
 
     // Register challenge
     const challengeKey = `${commit_id}-leaf-${leaf_idx}`
-    const challenge = {
+    const challenge: Challenge = {
       commit_id,
       leaf_idx,
       d_conflict,
@@ -162,7 +204,7 @@ export async function POST(req: NextRequest) {
       note: 'This is a demo resolution. In production, verifiers would run asynchronously.',
     }))
   } catch (e: unknown) {
-    console.error('Challenge leaf error:', e)
+    log.error('Challenge leaf error', e)
     return setCors(NextResponse.json({
       message: e instanceof Error ? e.message : 'Internal server error',
       details: e instanceof Error ? e.stack : String(e)

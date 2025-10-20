@@ -4,7 +4,11 @@
  * Phase 3: Batch Execution (Optimistic)
  */
 import { NextRequest, NextResponse } from 'next/server'
-import crypto from 'crypto'
+import { createLogger } from '@/lib/logger'
+import { jobQueue } from '@/services/queue/job-queue'
+import type { QueuedJob } from '@/types/queue'
+
+const log = createLogger('API:BatchPlan')
 
 function setCors(res: NextResponse) {
   res.headers.set('Access-Control-Allow-Origin', '*')
@@ -19,10 +23,15 @@ export async function OPTIONS() {
 
 interface DAGNode {
   id: number
-  job_id: string
+  job_pda: string
+  job_id: string  // For compatibility, same as job_pda
   cid_handles: string[]
+  ir_digest: string
+  commitment: string
   output_handle?: string
   depends_on: number[]
+  slot: number
+  status: string
 }
 
 interface DAGEdge {
@@ -31,68 +40,36 @@ interface DAGEdge {
 }
 
 /**
- * Generate dummy DAG for demo
- * In production, this would query actual submitted jobs and build dependency graph
+ * Build DAG from actual JobQueue jobs
+ *
+ * Current implementation: Simple sequential execution (no dependencies)
+ * Future: Parse IR to detect actual data dependencies
  */
-function generateDemoDAG() {
+function buildDAGFromJobs(jobs: QueuedJob[]): { nodes: DAGNode[], edges: DAGEdge[] } {
   const nodes: DAGNode[] = []
   const edges: DAGEdge[] = []
 
-  // Node 0: Input job (decrypt needed)
-  nodes.push({
-    id: 0,
-    job_id: crypto.randomBytes(16).toString('hex'),
-    cid_handles: [
-      `CID${crypto.randomBytes(8).toString('hex')}`,
-      `CID${crypto.randomBytes(8).toString('hex')}`,
-    ],
-    output_handle: crypto.randomBytes(16).toString('hex'),
-    depends_on: [],
+  // Sort jobs by slot (submission order)
+  const sortedJobs = [...jobs].sort((a, b) => a.slot - b.slot)
+
+  // Convert jobs to DAG nodes
+  sortedJobs.forEach((job, index) => {
+    nodes.push({
+      id: index,
+      job_pda: job.job_pda,
+      job_id: job.job_pda,  // Use job_pda as identifier
+      cid_handles: job.cid_handles,
+      ir_digest: job.ir_digest,
+      commitment: job.commitment,
+      output_handle: `output_${job.job_pda.slice(0, 16)}`,  // Mock output handle
+      depends_on: [],  // No dependencies in simple mode
+      slot: job.slot,
+      status: job.status,
+    })
   })
 
-  // Node 1: Input job (decrypt needed)
-  nodes.push({
-    id: 1,
-    job_id: crypto.randomBytes(16).toString('hex'),
-    cid_handles: [
-      `CID${crypto.randomBytes(8).toString('hex')}`,
-    ],
-    output_handle: crypto.randomBytes(16).toString('hex'),
-    depends_on: [],
-  })
-
-  // Node 2: Depends on node 0
-  const node2Output = crypto.randomBytes(16).toString('hex')
-  nodes.push({
-    id: 2,
-    job_id: crypto.randomBytes(16).toString('hex'),
-    cid_handles: [nodes[0].output_handle!],
-    output_handle: node2Output,
-    depends_on: [0],
-  })
-  edges.push({ from: 0, to: 2 })
-
-  // Node 3: Depends on node 1
-  const node3Output = crypto.randomBytes(16).toString('hex')
-  nodes.push({
-    id: 3,
-    job_id: crypto.randomBytes(16).toString('hex'),
-    cid_handles: [nodes[1].output_handle!],
-    output_handle: node3Output,
-    depends_on: [1],
-  })
-  edges.push({ from: 1, to: 3 })
-
-  // Node 4: Depends on nodes 2 and 3
-  nodes.push({
-    id: 4,
-    job_id: crypto.randomBytes(16).toString('hex'),
-    cid_handles: [node2Output, node3Output],
-    output_handle: crypto.randomBytes(16).toString('hex'),
-    depends_on: [2, 3],
-  })
-  edges.push({ from: 2, to: 4 })
-  edges.push({ from: 3, to: 4 })
+  // TODO: Analyze IR to build actual dependency graph
+  // For now, all jobs are independent (can execute in parallel)
 
   return { nodes, edges }
 }
@@ -161,10 +138,70 @@ function generateDecryptNeededBitmap(nodes: DAGNode[]): string {
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
-    const window = parseInt(searchParams.get('window') || '1000', 10)
+    const windowParam = searchParams.get('window')
+    const batchParam = searchParams.get('batch')
 
-    // Generate DAG
-    const { nodes, edges } = generateDemoDAG()
+    let jobs: QueuedJob[] = []
+    let window_start_slot = 0
+    let window_end_slot = 0
+
+    // Get jobs by batch PDA or slot window
+    if (batchParam) {
+      // Get jobs for specific batch
+      jobs = jobQueue.get_jobs_by_batch(batchParam)
+
+      if (jobs.length > 0) {
+        window_start_slot = Math.min(...jobs.map(j => j.slot))
+        window_end_slot = Math.max(...jobs.map(j => j.slot))
+      }
+
+      log.info('Fetching DAG for batch', {
+        batch: batchParam.slice(0, 8) + '...',
+        jobs: jobs.length
+      })
+    } else if (windowParam) {
+      // Get jobs by slot range (window_start -> window_start + 100)
+      window_start_slot = parseInt(windowParam, 10)
+      window_end_slot = window_start_slot + 100
+
+      jobs = jobQueue.get_jobs_by_slot_range(window_start_slot, window_end_slot)
+
+      log.info('Fetching DAG for slot window', {
+        start: window_start_slot,
+        end: window_end_slot,
+        jobs: jobs.length
+      })
+    } else {
+      // Default: Get all queued jobs
+      jobs = jobQueue.get_queued_jobs()
+
+      if (jobs.length > 0) {
+        window_start_slot = Math.min(...jobs.map(j => j.slot))
+        window_end_slot = Math.max(...jobs.map(j => j.slot))
+      }
+
+      log.info('Fetching DAG for all queued jobs', { jobs: jobs.length })
+    }
+
+    if (jobs.length === 0) {
+      return setCors(NextResponse.json({
+        type: 'batch-plan',
+        window_start_slot,
+        window_end_slot,
+        dag: {
+          nodes: [],
+          edges: [],
+        },
+        topo_order: [],
+        decrypt_needed_bitmap: '0x00',
+        queue_stats: jobQueue.get_stats(),
+        message: 'No jobs in queue. Submit jobs first via /api/actions/job/submit',
+        hint: 'Jobs are only enqueued after on-chain confirmation (JobSubmitted event)',
+      }))
+    }
+
+    // Build DAG from real jobs
+    const { nodes, edges } = buildDAGFromJobs(jobs)
 
     // Compute topological order
     const topo_order = topologicalSort(nodes, edges)
@@ -172,29 +209,44 @@ export async function GET(request: NextRequest) {
     // Generate decrypt-needed bitmap
     const decrypt_needed_bitmap = generateDecryptNeededBitmap(nodes)
 
+    const queueStats = jobQueue.get_stats()
+
     return setCors(NextResponse.json({
       type: 'batch-plan',
-      window_start_slot: window,
+      window_start_slot,
+      window_end_slot,
       dag: {
         nodes: nodes.map(n => ({
           id: n.id,
+          job_pda: n.job_pda,
           job_id: n.job_id,
           cid_handles: n.cid_handles,
+          ir_digest: n.ir_digest.slice(0, 16) + '...',  // Truncate for display
+          commitment: n.commitment.slice(0, 16) + '...',
           output_handle: n.output_handle,
+          slot: n.slot,
+          status: n.status,
         })),
         edges,
       },
       topo_order,
       decrypt_needed_bitmap,
+      queue_stats: {
+        total_jobs: queueStats.total_jobs,
+        queued: queueStats.queued_count,
+        executing: queueStats.executing_count,
+        completed: queueStats.completed_count,
+      },
       execution_hints: {
         description: 'Execute nodes in topological order',
-        decrypt_priority: 'Nodes with decrypt_needed_bitmap bits set should be executed first',
-        parallelism: 'Nodes at same depth can be executed in parallel',
+        decrypt_priority: 'All nodes currently need decryption (no dependencies)',
+        parallelism: 'All jobs can execute in parallel (no inter-job dependencies)',
+        note: 'Dependency analysis requires IR parsing (future work)',
       },
-      note: 'This is a demo DAG. In production, query actual jobs from batch window.',
+      data_source: 'real_job_queue',
     }))
   } catch (e: unknown) {
-    console.error('Batch plan error:', e)
+    log.error('Batch plan error', e)
     return setCors(NextResponse.json({
       message: e instanceof Error ? e.message : 'Internal server error',
       details: e instanceof Error ? e.stack : String(e)
