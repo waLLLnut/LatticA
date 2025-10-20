@@ -26,6 +26,41 @@ export async function GET() {
     const storageStats = ciphertextStore.get_stats()
     const pendingStats = pendingCiphertextStore.get_stats()
 
+    // Get detailed lists
+    // NOTE: For demo/development only! In production:
+    // - Implement pagination (e.g., ?page=1&limit=20)
+    // - Add filtering by status, owner, time range
+    // - Use database queries instead of in-memory stores
+    // - Consider caching for frequently accessed data
+    const queuedJobs = jobQueue.get_queued_jobs()
+    const executingJobs = jobQueue.get_executing_jobs()
+    const allCids = ciphertextStore.get_all()
+
+    // Format CID list (limit to recent 10 for demo)
+    // Production: Should return paginated results with proper indexing
+    const recentCids = allCids.slice(-10).map(cid => ({
+      cid_pda: cid.cid_pda,
+      owner: cid.metadata.owner,
+      created_at: cid.metadata.created_at,
+      status: cid.verification?.status || 'pending',
+      ciphertext_hash: cid.ciphertext_hash.slice(0, 16) + '...',
+    }))
+
+    // Format Job list
+    const jobsList = queuedJobs.map(job => ({
+      job_pda: job.job,
+      batch: job.batch,
+      cid_count: job.cid_handles.length,
+      slot: job.slot,
+      status: 'queued',
+    })).concat(executingJobs.map(job => ({
+      job_pda: job.job,
+      batch: job.batch,
+      cid_count: job.cid_handles.length,
+      slot: job.slot,
+      status: 'executing',
+    })))
+
     return NextResponse.json({
       status: 'ok',
       services: {
@@ -43,11 +78,13 @@ export async function GET() {
           executing: queueStats.executing_count,
           completed: queueStats.completed_count,
           failed: queueStats.failed_count,
+          jobs: jobsList,
         },
         storage: {
           confirmed_cids: storageStats.confirmed_count,
           pending_cids: pendingStats.total_pending,
           total_cids: storageStats.total_cids,
+          recent_cids: recentCids,
         },
       },
     })

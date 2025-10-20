@@ -1,6 +1,22 @@
 /**
  * In-memory Ciphertext Storage
  * Thread-safe singleton for storing registered ciphertexts
+ *
+ * ⚠️  WARNING: DEMO/DEVELOPMENT IMPLEMENTATION ONLY!
+ *
+ * This implementation uses in-memory Map storage which is:
+ * - NOT persistent (data lost on server restart)
+ * - NOT scalable (limited by RAM)
+ * - NOT suitable for production use
+ *
+ * Production requirements:
+ * - Persistent database (PostgreSQL, MongoDB, Cassandra, etc.)
+ * - Proper indexing on frequently queried fields (owner, status, created_at)
+ * - Pagination for all list operations (limit + offset or cursor-based)
+ * - Caching layer for hot data (Redis, Memcached)
+ * - Backup and recovery mechanisms
+ * - Data encryption at rest
+ * - Horizontal scaling with sharding/partitioning
  */
 
 import { createLogger } from '@/lib/logger'
@@ -136,6 +152,23 @@ class CiphertextStore {
     return Array.from(this.store.values()).filter(
       stored => stored.metadata.owner === owner
     )
+  }
+
+  /**
+   * Get all stored ciphertexts
+   *
+   * WARNING: For demo/development only!
+   * This method loads ALL ciphertexts into memory which is inefficient for large datasets.
+   *
+   * Production recommendations:
+   * - Replace in-memory Map with a proper database (PostgreSQL, MongoDB, etc.)
+   * - Implement pagination with offset/limit or cursor-based pagination
+   * - Add indexes on frequently queried fields (owner, created_at, status)
+   * - Consider using a search engine (Elasticsearch) for complex queries
+   * - Implement caching layer (Redis) for hot data
+   */
+  get_all(): StoredCiphertext[] {
+    return Array.from(this.store.values())
   }
 
   /**
