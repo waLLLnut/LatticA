@@ -93,13 +93,46 @@ export async function GET(req: NextRequest) {
     },
     links: {
       actions: [{
-        href: `${baseURL}/api/actions/job/registerCIDs?ciphertexts={ciphertexts}&enc_params={enc_params}&policy_ctx={policy_ctx}&provenance={provenance}`,
+        href: `${baseURL}/api/actions/job/registerCIDs?ciphertext={ciphertext}&encryption_scheme={encryption_scheme}&policy_type={policy_type}&provenance={provenance}`,
         label: 'Register CIDs',
         parameters: [
-          { name: 'ciphertexts', label: 'Ciphertexts (JSON)', required: true },
-          { name: 'enc_params', label: 'Encryption Params (JSON)', required: true },
-          { name: 'policy_ctx', label: 'Policy Context (JSON)', required: true },
-          { name: 'provenance', label: 'Provenance', required: false },
+          {
+            name: 'ciphertext',
+            label: 'Encrypted Data',
+            required: true,
+          },
+          {
+            name: 'encryption_scheme',
+            label: 'Encryption Scheme',
+            type: 'select',
+            required: true,
+            options: [
+              { label: 'FHE16 (Default)', value: 'fhe16', selected: true },
+              { label: 'FHE32 (High Security)', value: 'fhe32' },
+            ]
+          },
+          {
+            name: 'policy_type',
+            label: 'Access Policy',
+            type: 'select',
+            required: true,
+            options: [
+              { label: 'Compute Only', value: 'compute', selected: true },
+              { label: 'Compute & Store', value: 'compute-store' },
+              { label: 'Full Access', value: 'full' },
+            ]
+          },
+          {
+            name: 'provenance',
+            label: 'Data Source',
+            type: 'select',
+            required: false,
+            options: [
+              { label: 'Client', value: 'client', selected: true },
+              { label: 'Oracle', value: 'oracle' },
+              { label: 'dApp', value: 'dapp' },
+            ]
+          },
         ]
       }]
     },
@@ -118,15 +151,19 @@ export async function POST(req: NextRequest) {
     const url = new URL(req.url)
 
     // Get parameters from either query params (Blinks Inspector) or body (Dial.to)
-    // Blinks Inspector sends via query params, Dial.to sends in nested "data" object
     const bodyData = rawBody.data || rawBody
     const account = rawBody.account
 
-    // Try query params first, then fall back to body
+    // New simplified parameters
+    const ciphertext_raw = url.searchParams.get('ciphertext') || bodyData.ciphertext
+    const encryption_scheme = url.searchParams.get('encryption_scheme') || bodyData.encryption_scheme || 'fhe16'
+    const policy_type = url.searchParams.get('policy_type') || bodyData.policy_type || 'compute'
+    const provenance_raw = url.searchParams.get('provenance') || bodyData.provenance || 'client'
+
+    // Backward compatibility: support old parameter names (ciphertexts, enc_params, policy_ctx)
     const ciphertexts_raw = url.searchParams.get('ciphertexts') || bodyData.ciphertexts
     const enc_params_raw = url.searchParams.get('enc_params') || bodyData.enc_params
     const policy_ctx_raw = url.searchParams.get('policy_ctx') || bodyData.policy_ctx
-    const provenance_raw = url.searchParams.get('provenance') || bodyData.provenance || 'client'
 
     // Debug logging
     log.info('POST request received', {
@@ -134,18 +171,43 @@ export async function POST(req: NextRequest) {
       query_params: Array.from(url.searchParams.keys()),
       account: account ? 'present' : 'missing',
       has_nested_data: !!rawBody.data,
-      source: url.searchParams.has('ciphertexts') ? 'query_params' : 'body',
+      source: url.searchParams.has('ciphertext') ? 'query_params' : 'body',
     })
 
-    // Parse JSON parameters with error handling
+    // Convert simplified parameters to internal format
     let ciphertexts, enc_params: EncryptionParams, policy_ctx: PolicyContext
-    try {
-      ciphertexts = typeof ciphertexts_raw === 'string' ? JSON.parse(ciphertexts_raw) : ciphertexts_raw
-      enc_params = typeof enc_params_raw === 'string' ? JSON.parse(enc_params_raw) : enc_params_raw
-      policy_ctx = typeof policy_ctx_raw === 'string' ? JSON.parse(policy_ctx_raw) : policy_ctx_raw
-    } catch {
+
+    if (ciphertext_raw) {
+      // New format: convert single ciphertext to array
+      ciphertexts = [{ encrypted_data: ciphertext_raw }]
+
+      // Map encryption_scheme to enc_params
+      enc_params = { scheme: encryption_scheme.toUpperCase() }
+
+      // Map policy_type to policy_ctx
+      const policyMap: Record<string, string[]> = {
+        'compute': ['compute'],
+        'compute-store': ['compute', 'store'],
+        'full': ['compute', 'store', 'transfer']
+      }
+      policy_ctx = {
+        allow: policyMap[policy_type] || ['compute'],
+        version: '1.0'
+      }
+    } else if (ciphertexts_raw) {
+      // Backward compatibility: parse JSON parameters
+      try {
+        ciphertexts = typeof ciphertexts_raw === 'string' ? JSON.parse(ciphertexts_raw) : ciphertexts_raw
+        enc_params = typeof enc_params_raw === 'string' ? JSON.parse(enc_params_raw) : enc_params_raw
+        policy_ctx = typeof policy_ctx_raw === 'string' ? JSON.parse(policy_ctx_raw) : policy_ctx_raw
+      } catch {
+        return cors(NextResponse.json({
+          message: 'Invalid JSON in parameters (ciphertexts, enc_params, or policy_ctx)'
+        }, { status: 400 }))
+      }
+    } else {
       return cors(NextResponse.json({
-        message: 'Invalid JSON in parameters (ciphertexts, enc_params, or policy_ctx)'
+        message: 'Missing ciphertext parameter'
       }, { status: 400 }))
     }
 
