@@ -87,9 +87,12 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const handle = searchParams.get('handle')
 
+  // Generate dynamic base URL
+  const baseURL = new URL(request.url).origin
+
   return setCors(NextResponse.json({
     type: 'action',
-    icon: 'http://localhost:3000/logo.png',
+    icon: new URL('/logo.png', baseURL).toString(),
     title: 'Gatekeeper · User Decrypt',
     description: 'Request user-specific decryption with session key',
     label: 'User Decrypt',
@@ -101,13 +104,12 @@ export async function GET(request: NextRequest) {
     }),
     links: {
       actions: [{
-        type: 'post',
-        href: '/api/actions/decrypt/user',
+        href: `${baseURL}/api/actions/decrypt/user?handle={handle}&user_session_pubkey={user_session_pubkey}&purpose_ctx={purpose_ctx}`,
         label: 'Request User Decrypt',
         parameters: [
           { name: 'handle', label: 'Handle (0x...64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
           { name: 'user_session_pubkey', label: 'User Session Public Key (0x...64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
-          { name: 'purpose_ctx', label: 'Purpose Context (optional)', required: false, type: 'textarea' },
+          { name: 'purpose_ctx', label: 'Purpose Context (optional)', required: false },
         ],
       }],
     },
@@ -121,8 +123,17 @@ export async function GET(request: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { account, handle, user_session_pubkey, purpose_ctx } = body
+    const rawBody = await req.json()
+    const url = new URL(req.url)
+
+    // Get parameters from either query params (Blinks Inspector) or body (Dial.to)
+    const bodyData = rawBody.data || rawBody
+    const account = rawBody.account
+
+    // Try query params first, then fall back to body
+    const handle = url.searchParams.get('handle') || bodyData.handle
+    const user_session_pubkey = url.searchParams.get('user_session_pubkey') || bodyData.user_session_pubkey
+    const purpose_ctx = url.searchParams.get('purpose_ctx') || bodyData.purpose_ctx
 
     // Validation
     if (!account || !handle || !user_session_pubkey) {
@@ -184,12 +195,6 @@ export async function POST(req: NextRequest) {
         parties: kms_parties,
         quorum,
         note: 'After transaction confirms, KMS parties will perform threshold decryption',
-      },
-      links: {
-        next: {
-          type: 'get',
-          href: `/api/actions/decrypt/result?handle=${handle}`,
-        },
       },
     }))
   } catch (e: unknown) {

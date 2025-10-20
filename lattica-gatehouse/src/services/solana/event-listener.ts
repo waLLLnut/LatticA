@@ -285,31 +285,60 @@ export class GatekeeperEventListener {
       throw error
     }
 
-    // 2. Get pending data
+    // 2. Get pending data (if available)
     const pending = pendingCiphertextStore.get(event.cid)
-    if (!pending) {
-      log.warn('No pending data found for CID, skipping', {
-        cid: event.cid,
-        note: 'This is expected if server was restarted or CID was registered before listener started',
-      })
-      return
-    }
 
-    // 3. Move from pending to confirmed store
+    // 3. Store CID in confirmed storage
+    // If pending data is available, use it. Otherwise, create minimal record from event.
     try {
-      ciphertextStore.store_ciphertext(
-        pending.cid_pda,
-        pending.ciphertext,
-        pending.ciphertext_hash,
-        pending.enc_params,
-        pending.policy_ctx,
-        pending.policy_hash,
-        pending.owner,
-        pending.storage_ref,
-        pending.provenance,
-      )
+      if (pending) {
+        // Full data available from pending store
+        ciphertextStore.store_ciphertext(
+          pending.cid_pda,
+          pending.ciphertext,
+          pending.ciphertext_hash,
+          pending.enc_params,
+          pending.policy_ctx,
+          pending.policy_hash,
+          pending.owner,
+          pending.storage_ref,
+          pending.provenance,
+        )
 
-      // Update verification status
+        // Remove from pending
+        pendingCiphertextStore.remove(event.cid)
+
+        log.info('CID confirmed with full data from pending store', {
+          cid: event.cid.slice(0, 8) + '...',
+          slot: event.slot,
+        })
+      } else {
+        // No pending data (server restart or late registration)
+        // Create minimal record from event data
+        log.warn('No pending data found, creating minimal record from event', {
+          cid: event.cid,
+        })
+
+        ciphertextStore.store_ciphertext(
+          event.cid,
+          { note: 'Ciphertext data not available - registered before server start' },
+          event.ciphertext_hash,
+          { scheme: 'unknown' },  // Minimal enc_params
+          { note: 'Policy context not available' },  // Minimal policy_ctx
+          event.policy_hash,
+          event.owner,
+          `ipfs://Qm${event.ciphertext_hash.slice(4, 50)}`,  // Reconstructed storage_ref
+          'on-chain-event',  // Mark as recovered from event
+        )
+
+        log.info('CID confirmed with minimal data from event', {
+          cid: event.cid.slice(0, 8) + '...',
+          slot: event.slot,
+          note: 'Ciphertext and policy details not available',
+        })
+      }
+
+      // Update verification status (common for both paths)
       ciphertextStore.update_verification(
         event.cid,
         'confirmed',
@@ -317,20 +346,19 @@ export class GatekeeperEventListener {
         event.slot
       )
 
-      // Update registration log
-      registrationLog.update_entry_status(
-        event.cid,
-        'confirmed',
-        event.tx_signature
-      )
-
-      // Remove from pending
-      pendingCiphertextStore.remove(event.cid)
-
-      log.info('CID confirmed and moved to storage', {
-        cid: event.cid.slice(0, 8) + '...',
-        slot: event.slot,
-      })
+      // Update registration log (if exists)
+      try {
+        registrationLog.update_entry_status(
+          event.cid,
+          'confirmed',
+          event.tx_signature
+        )
+      } catch {
+        // Registration log entry might not exist if server was restarted
+        log.debug('Registration log entry not found (expected if server was restarted)', {
+          cid: event.cid,
+        })
+      }
     } catch (error) {
       log.error('Failed to confirm CID', error, { cid: event.cid })
       throw error

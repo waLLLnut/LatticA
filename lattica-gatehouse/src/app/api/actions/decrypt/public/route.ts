@@ -93,9 +93,12 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const handle = searchParams.get('handle')
 
+  // Generate dynamic base URL
+  const baseURL = new URL(request.url).origin
+
   return setCors(NextResponse.json({
     type: 'action',
-    icon: 'http://localhost:3000/logo.png',
+    icon: new URL('/logo.png', baseURL).toString(),
     title: 'Gatekeeper · Public Decrypt',
     description: 'Request public decryption with domain signature',
     label: 'Public Decrypt',
@@ -107,13 +110,12 @@ export async function GET(request: NextRequest) {
     }),
     links: {
       actions: [{
-        type: 'post',
-        href: '/api/actions/decrypt/public',
+        href: `${baseURL}/api/actions/decrypt/public?handle={handle}&domain_signature={domain_signature}&purpose_ctx={purpose_ctx}`,
         label: 'Request Public Decrypt',
         parameters: [
           { name: 'handle', label: 'Handle (0x...64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
           { name: 'domain_signature', label: 'Domain Signature (0x...128hex)', required: true, pattern: '^0x[0-9a-fA-F]{128}$' },
-          { name: 'purpose_ctx', label: 'Purpose Context (optional)', required: false, type: 'textarea' },
+          { name: 'purpose_ctx', label: 'Purpose Context (optional)', required: false },
         ],
       }],
     },
@@ -127,8 +129,17 @@ export async function GET(request: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { account, handle, domain_signature, purpose_ctx } = body
+    const rawBody = await req.json()
+    const url = new URL(req.url)
+
+    // Get parameters from either query params (Blinks Inspector) or body (Dial.to)
+    const bodyData = rawBody.data || rawBody
+    const account = rawBody.account
+
+    // Try query params first, then fall back to body
+    const handle = url.searchParams.get('handle') || bodyData.handle
+    const domain_signature = url.searchParams.get('domain_signature') || bodyData.domain_signature
+    const purpose_ctx = url.searchParams.get('purpose_ctx') || bodyData.purpose_ctx
 
     // Validation
     if (!account || !handle || !domain_signature) {
@@ -196,12 +207,6 @@ export async function POST(req: NextRequest) {
         parties: kms_parties,
         quorum,
         note: 'After transaction confirms, KMS parties will perform threshold decryption and expose plaintext on-chain',
-      },
-      links: {
-        next: {
-          type: 'get',
-          href: `/api/actions/decrypt/result?handle=${handle}`,
-        },
       },
     }))
   } catch (e: unknown) {

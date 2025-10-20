@@ -155,9 +155,12 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // Generate dynamic base URL
+  const baseURL = new URL(request.url).origin
+
   const body = {
     type: 'action',
-    icon: 'http://localhost:3000/logo.png',
+    icon: new URL('/logo.png', baseURL).toString(),
     title: 'Gatekeeper · Submit Confidential Job',
     description: 'Submit a confidential computation job using registered CIDs.',
     label: 'Submit Confidential Job',
@@ -181,14 +184,13 @@ export async function GET(request: NextRequest) {
     ...(preview && { preview }),
     links: {
       actions: [{
-        type: 'post',
-        href: '/api/actions/job/submit',
+        href: `${baseURL}/api/actions/job/submit?cids={cids}&batch={batch}&ir_digest={ir_digest}&policy_ctx={policy_ctx}&provenance={provenance}&nonce={nonce}`,
         label: 'Submit Job',
         parameters: [
-          { name: 'cids', label: 'Registered CID PDAs (JSON array)', required: true, type: 'textarea' },
-          { name: 'batch', label: 'Batch Window Pubkey', required: true, type: 'text' },
+          { name: 'cids', label: 'Registered CID PDAs (JSON array)', required: true },
+          { name: 'batch', label: 'Batch Window Pubkey', required: true },
           { name: 'ir_digest', label: 'IR Digest (0x…64hex)', required: true, pattern: '^0x[0-9a-fA-F]{64}$' },
-          { name: 'policy_ctx', label: 'Policy Context (JSON)', required: true, type: 'textarea' },
+          { name: 'policy_ctx', label: 'Policy Context (JSON)', required: true },
           { name: 'provenance', label: 'Provenance (0=server, 1=client)', required: false, type: 'number' },
           { name: 'nonce', label: 'Optional Nonce (0x…64hex)', required: false, pattern: '^0x[0-9a-fA-F]{64}$' },
         ],
@@ -201,19 +203,43 @@ export async function GET(request: NextRequest) {
 /* =============================== POST ============================= */
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { account, cids, batch, ir_digest, policy_ctx, provenance, nonce } = body
+    const rawBody = await req.json()
+    const url = new URL(req.url)
+
+    // Get parameters from either query params (Blinks Inspector) or body (Dial.to)
+    const bodyData = rawBody.data || rawBody
+    const account = rawBody.account
+
+    // Try query params first, then fall back to body
+    const cids_raw = url.searchParams.get('cids') || bodyData.cids
+    const batch_raw = url.searchParams.get('batch') || bodyData.batch
+    const ir_digest_raw = url.searchParams.get('ir_digest') || bodyData.ir_digest
+    const policy_ctx_raw = url.searchParams.get('policy_ctx') || bodyData.policy_ctx
+    const provenance_raw = url.searchParams.get('provenance') || bodyData.provenance || '1'
+    const nonce_raw = url.searchParams.get('nonce') || bodyData.nonce
 
     // Validation
-    if (!account || !cids || !batch || !ir_digest || !policy_ctx) {
-      return setCors(NextResponse.json({ 
-        message: 'Missing required fields: account, cids, batch, ir_digest, policy_ctx' 
+    if (!account || !cids_raw || !batch_raw || !ir_digest_raw || !policy_ctx_raw) {
+      return setCors(NextResponse.json({
+        message: 'Missing required fields: account, cids, batch, ir_digest, policy_ctx'
       }, { status: 400 }))
     }
 
-    const parsedCids: string[] = typeof cids === 'string' ? JSON.parse(cids) : cids
-    const parsedPolicyCtx: PolicyContext = typeof policy_ctx === 'string' ? JSON.parse(policy_ctx) : policy_ctx
-    const provenanceValue = provenance ?? 1
+    // Parse JSON parameters with error handling
+    let parsedCids: string[], parsedPolicyCtx: PolicyContext
+    try {
+      parsedCids = typeof cids_raw === 'string' ? JSON.parse(cids_raw) : cids_raw
+      parsedPolicyCtx = typeof policy_ctx_raw === 'string' ? JSON.parse(policy_ctx_raw) : policy_ctx_raw
+    } catch {
+      return setCors(NextResponse.json({
+        message: 'Invalid JSON in parameters (cids or policy_ctx)'
+      }, { status: 400 }))
+    }
+
+    const provenanceValue = typeof provenance_raw === 'string' ? parseInt(provenance_raw) : provenance_raw
+    const batch = batch_raw
+    const ir_digest = ir_digest_raw
+    const nonce = nonce_raw
 
     if (!Array.isArray(parsedCids) || parsedCids.length === 0) {
       return setCors(NextResponse.json({ message: 'cids must be non-empty array' }, { status: 400 }))

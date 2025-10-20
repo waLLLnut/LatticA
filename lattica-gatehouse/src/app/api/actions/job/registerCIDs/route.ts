@@ -54,7 +54,7 @@ function getFHEcpkInfo() {
   }
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const fhe = getFHEcpkInfo()
   const domain_hash = calcDomainHash({
     chain_id: fhe.domain.chain_id,
@@ -75,9 +75,12 @@ export async function GET() {
   const confirmedStats = ciphertextStore.get_stats()
   const pendingStats = pendingCiphertextStore.get_stats()
   
+  // Generate dynamic base URL
+  const baseURL = new URL(req.url).origin
+  
   return cors(NextResponse.json({
     type: 'action',
-    icon: 'http://localhost:3000/logo.png',
+    icon: new URL('/logo.png', baseURL).toString(),
     title: 'Gatekeeper · Register CID Handles',
     description: 'Register client-encrypted ciphertexts as on-chain Content Identifiers.',
     label: 'Register CIDs',
@@ -90,14 +93,13 @@ export async function GET() {
     },
     links: {
       actions: [{
-        type: 'post',
-        href: '/api/actions/job/registerCIDs',
+        href: `${baseURL}/api/actions/job/registerCIDs?ciphertexts={ciphertexts}&enc_params={enc_params}&policy_ctx={policy_ctx}&provenance={provenance}`,
         label: 'Register CIDs',
         parameters: [
-          { name: 'ciphertexts', label: 'Ciphertexts (JSON)', required: true, type: 'textarea' },
-          { name: 'enc_params', label: 'Encryption Params (JSON)', required: true, type: 'textarea' },
-          { name: 'policy_ctx', label: 'Policy Context (JSON)', required: true, type: 'textarea' },
-          { name: 'provenance', label: 'Provenance', required: false, type: 'text' },
+          { name: 'ciphertexts', label: 'Ciphertexts (JSON)', required: true },
+          { name: 'enc_params', label: 'Encryption Params (JSON)', required: true },
+          { name: 'policy_ctx', label: 'Policy Context (JSON)', required: true },
+          { name: 'provenance', label: 'Provenance', required: false },
         ]
       }]
     },
@@ -112,17 +114,61 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { account } = body
-    const ciphertexts = typeof body.ciphertexts === 'string' ? JSON.parse(body.ciphertexts) : body.ciphertexts
-    const enc_params: EncryptionParams = typeof body.enc_params === 'string' ? JSON.parse(body.enc_params) : body.enc_params
-    const policy_ctx: PolicyContext = typeof body.policy_ctx === 'string' ? JSON.parse(body.policy_ctx) : body.policy_ctx
-    const provenance = body.provenance || 'client'
+    const rawBody = await req.json()
+    const url = new URL(req.url)
+
+    // Get parameters from either query params (Blinks Inspector) or body (Dial.to)
+    // Blinks Inspector sends via query params, Dial.to sends in nested "data" object
+    const bodyData = rawBody.data || rawBody
+    const account = rawBody.account
+
+    // Try query params first, then fall back to body
+    const ciphertexts_raw = url.searchParams.get('ciphertexts') || bodyData.ciphertexts
+    const enc_params_raw = url.searchParams.get('enc_params') || bodyData.enc_params
+    const policy_ctx_raw = url.searchParams.get('policy_ctx') || bodyData.policy_ctx
+    const provenance_raw = url.searchParams.get('provenance') || bodyData.provenance || 'client'
+
+    // Debug logging
+    log.info('POST request received', {
+      body_keys: Object.keys(rawBody),
+      query_params: Array.from(url.searchParams.keys()),
+      account: account ? 'present' : 'missing',
+      has_nested_data: !!rawBody.data,
+      source: url.searchParams.has('ciphertexts') ? 'query_params' : 'body',
+    })
+
+    // Parse JSON parameters with error handling
+    let ciphertexts, enc_params: EncryptionParams, policy_ctx: PolicyContext
+    try {
+      ciphertexts = typeof ciphertexts_raw === 'string' ? JSON.parse(ciphertexts_raw) : ciphertexts_raw
+      enc_params = typeof enc_params_raw === 'string' ? JSON.parse(enc_params_raw) : enc_params_raw
+      policy_ctx = typeof policy_ctx_raw === 'string' ? JSON.parse(policy_ctx_raw) : policy_ctx_raw
+    } catch {
+      return cors(NextResponse.json({
+        message: 'Invalid JSON in parameters (ciphertexts, enc_params, or policy_ctx)'
+      }, { status: 400 }))
+    }
+
+    const provenance = provenance_raw
 
     // Validation
     if (!account || !ciphertexts || !enc_params || !policy_ctx) {
+      log.error('Validation failed', {
+        account: !!account,
+        ciphertexts: !!ciphertexts,
+        enc_params: !!enc_params,
+        policy_ctx: !!policy_ctx,
+      })
       return cors(NextResponse.json({
-        message: 'Missing required fields: account, ciphertexts, enc_params, policy_ctx'
+        message: 'Missing required fields: account, ciphertexts, enc_params, policy_ctx',
+        debug: {
+          received_keys: Object.keys(rawBody),
+          has_nested_data: !!rawBody.data,
+          account_present: !!account,
+          ciphertexts_present: !!ciphertexts,
+          enc_params_present: !!enc_params,
+          policy_ctx_present: !!policy_ctx,
+        }
       }, { status: 400 }))
     }
 
@@ -216,6 +262,8 @@ export async function POST(req: NextRequest) {
     })
 
     // Build transaction with recent blockhash
+    // Use 'confirmed' instead of 'finalized' for fresher blockhash (Blinks best practice)
+    // This prevents blockhash expiry during user signing on Dial.to
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed')
     const tx = new Transaction()
     tx.feePayer = owner
@@ -223,43 +271,77 @@ export async function POST(req: NextRequest) {
     tx.lastValidBlockHeight = lastValidBlockHeight
     tx.add(...instructions)
 
+    // Serialize transaction
+    // IMPORTANT: Use verifySignatures: false since we don't have user's signature yet
     const serializedTx = tx.serialize({
       requireAllSignatures: false,
       verifySignatures: false,
     })
 
-    const nextHref = `/api/actions/job/submit?cids=${encodeURIComponent(JSON.stringify(cids.map(c => c.cid_pda)))}`
-
-    log.info('Created pending registration', { 
-      reg_id: registration.reg_id.slice(0, 8) + '...', 
-      cids: cids.length 
+    // Log transaction details for debugging
+    log.info('Transaction details', {
+      feePayer: owner.toBase58(),
+      blockhash: blockhash.slice(0, 8) + '...',
+      instructions: instructions.length,
+      accounts_per_ix: instructions[0]?.keys.length || 0,
+      cid_pdas: cids.map(c => c.cid_pda.slice(0, 8) + '...'),
     })
 
+    // Simulate transaction to catch errors early
+    let simulationResult: { success: boolean; error?: any; logs?: string[] } = { success: false }
+    try {
+      const simulation = await connection.simulateTransaction(tx)
+      if (simulation.value.err) {
+        // Log with better error formatting
+        console.error('=== SIMULATION ERROR DETAILS ===')
+        console.error('Error object:', simulation.value.err)
+        console.error('Error JSON:', JSON.stringify(simulation.value.err))
+        console.error('Logs:', simulation.value.logs)
+        console.error('================================')
+
+        log.error('Transaction simulation failed', {
+          error: JSON.stringify(simulation.value.err, null, 2),
+          logs: simulation.value.logs,
+        })
+        simulationResult = {
+          success: false,
+          error: simulation.value.err,
+          logs: simulation.value.logs || [],
+        }
+
+        // Return error immediately if simulation fails
+        return cors(NextResponse.json({
+          message: 'Transaction simulation failed. This transaction will likely fail on-chain.',
+          error: simulation.value.err,
+          logs: simulation.value.logs,
+          hint: 'Common causes: Program not initialized (missing config PDA), insufficient SOL balance, or invalid instruction data',
+          troubleshooting: {
+            check_balance: `Ensure ${owner.toBase58()} has sufficient SOL (>0.01 SOL)`,
+            check_program: `Program ${gatekeeperProgram.toBase58()} must be initialized`,
+            cid_pdas: cids.map(c => c.cid_pda),
+          }
+        }, { status: 400 }))
+      } else {
+        log.info('Transaction simulation successful', {
+          units_consumed: simulation.value.unitsConsumed,
+        })
+        simulationResult = { success: true }
+      }
+    } catch (simError) {
+      log.warn('Simulation check failed (non-fatal)', simError)
+      // Continue anyway - some valid txs fail simulation
+    }
+
+    log.info('Created pending registration', {
+      reg_id: registration.reg_id.slice(0, 8) + '...',
+      cids: cids.length
+    })
+
+    // Standard Solana Actions response format
+    // Keep it minimal for better Dial.to compatibility
     return cors(NextResponse.json({
       transaction: Buffer.from(serializedTx).toString('base64'),
-      message: `Register ${cids.length} CID handle(s) on-chain`,
-      registration: {
-        reg_id: registration.reg_id,
-        status: 'pending',  // Will be 'confirmed' after on-chain event
-        created_at: registration.created_at,
-      },
-      cids: cids.map(c => ({
-        cid_pda: c.cid_pda,
-        ciphertext_hash: c.ciphertext_hash,
-        policy_hash: c.policy_hash,
-        storage_ref: c.storage_ref,
-      })),
-      links: { next: { type: 'post', href: nextHref } },
-      workflow: {
-        current: 'Transaction created',
-        next_steps: [
-          '1. Sign and send this transaction',
-          '2. Wait for on-chain confirmation',
-          '3. EventListener will move CIDs from pending → confirmed',
-          '4. Use confirmed CID PDAs in /api/actions/job/submit'
-        ]
-      },
-      note: 'CIDs are pending (5min TTL). Only usable after on-chain confirmation event.'
+      message: `Successfully registered ${cids.length} CID handle(s)`,
     }))
   } catch (e: unknown) {
     log.error('Register CIDs error', e)
