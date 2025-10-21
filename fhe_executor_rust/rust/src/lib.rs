@@ -252,6 +252,20 @@ impl Ciphertext {
 }
 */
 
+pub struct LiqResult {
+    pub cipher: Ciphertext,
+    pub plain: i32,
+}
+
+impl LiqResult {
+    pub fn new(cipher: Ciphertext) -> Self {
+        LiqResult {
+            cipher: cipher,
+            plain: 1, // 초기값
+        }
+    }
+}
+
 impl Ciphertext {
     pub fn encrypt_i32(m: i32, msg_bit: i32) -> Self {
         let ct = unsafe { fhe16_enc_int(m as c_int, msg_bit as c_int) };
@@ -318,6 +332,61 @@ impl Ciphertext {
 
     pub fn add_powtwo(a: &Ciphertext, pow: i32) -> Self {
         Ciphertext(unsafe { fhe16_add_powtwo(a.0, pow as c_int) })
+    }
+
+    pub fn borrow(asset_1: Ciphertext, asset_2: Ciphertext, loan: &Ciphertext, sk: &SecretKey) -> (Ciphertext, Ciphertext) { // asset_1 : user, asset_2 : bank
+        let comp = Ciphertext::lt(loan, &asset_2);
+        let flag = comp.decrypt_i64(&sk);
+
+        if flag == 1 {
+            let asset_1_result = Ciphertext::add(&asset_1, loan);
+            let asset_2_result = Ciphertext::sub(&asset_2, loan);
+            (asset_1_result, asset_2_result)
+        } else {
+            (asset_1, asset_2)
+        }
+    }
+
+    pub fn decrypt_borrow(asset_1: Ciphertext, asset_2: Ciphertext, sk: &SecretKey) -> (i64, i64) {
+        let asset_1_dec = asset_1.decrypt_i64(sk);
+        let asset_2_dec = asset_2.decrypt_i64(sk);
+        (asset_1_dec, asset_2_dec)
+    }
+
+    pub fn Withdraw(mut asset: Ciphertext, amount: &Ciphertext, sk: &SecretKey) -> Ciphertext {
+        let comp = Ciphertext::lt(amount, &asset);
+        let flag = comp.decrypt_i64(&sk);
+
+        if flag == 1 {
+            Ciphertext::sub(&asset, amount)
+        } else {
+            asset
+        }
+    }
+
+    pub fn decrypt_withdraw(asset: Ciphertext, sk: &SecretKey) -> i64 {
+        asset.decrypt_i64(sk)
+    }
+
+    pub fn Deposit(asset: &Ciphertext, amount: &Ciphertext) -> Ciphertext {
+        Ciphertext::add(asset, amount)
+    }
+
+    pub fn decrypt_deposit(asset: Ciphertext, sk: &SecretKey) -> i64 {
+        asset.decrypt_i64(sk)
+    }
+
+    pub fn Liquidation(curr_price: &Ciphertext, liq_price: &Ciphertext, collateral: &mut LiqResult, sk: &SecretKey){
+        let comp = Ciphertext::lt(liq_price, curr_price);
+        let flag = comp.decrypt_i64(&sk);
+
+        if flag == 0 {
+            collateral.plain = 0;
+        }
+    }
+
+    pub fn decrypt_liquidation(collateral: LiqResult, sk: &SecretKey) -> i64 {
+        collateral.cipher.decrypt_i64(sk)
     }
 }
 
