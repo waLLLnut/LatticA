@@ -1,0 +1,2 @@
+emcmake cmake -S .. -B build-wasm
+cmake --build build-wasm --config Release
