@@ -26,17 +26,21 @@ This repository provides a **prototype** for performing **LWE encryption** using
 
 ---
 
-## Build Instructions (Linux)
+## Build & Run (Linux)
 
-You need [Emscripten](https://emscripten.org/docs/getting_started/downloads.html) installed and accessible in your environment (for example, `emcmake` must be available in your PATH).
+Prerequisites:
+- Emscripten installed and on your `PATH` (so `emcmake` is available).
+- Node.js and npm (for running the test server with `npx`).
 
 ```bash
-# 1. Create a build directory
+# Build
 mkdir build
-
-# 2. Configure with Emscripten
 emcmake cmake -S .. -B build-wasm
-
-# 3. Build in release mode
 cmake --build build-wasm --config Release
 
+# Run the demo page
+cd test_page
+npx http-server -p 8080 --cors
+
+# Open the demo in your browser:
+# http://localhost:8080/index.html
