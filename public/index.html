@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>FHE16 Encrypt Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;max-width:860px;margin:22px auto;padding:0 14px}
+    h1{margin:0 0 6px}
+    fieldset{border:1px solid #ccc;border-radius:10px;padding:12px 16px;margin:16px 0}
+    label{display:block;margin:6px 0 4px;font-weight:600}
+    input,button{font:inherit;padding:8px}
+    input[type="number"]{width:100%;box-sizing:border-box}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .ok{color:#0a7}.err{color:#c00;white-space:pre-wrap}.muted{color:#666;font-size:13px}
+    pre#out{background:#f7f7f7;padding:10px;border-radius:8px;min-height:70px}
+    table.meta{width:100%;border-collapse:collapse}
+    table.meta td{padding:6px 4px;border-bottom:1px dashed #e5e5e5}
+    code.k{background:#f0f0f0;padding:1px 6px;border-radius:6px}
+    pre#dbg{background:#111;color:#9f9;padding:10px;border-radius:8px;min-height:100px;white-space:pre-wrap}
+  </style>
+  <script defer src="fhe16.js"></script>
+</head>
+<body>
+  <h1>FHE16 암호화 데모</h1>
+  <p class="muted">pk.bin이 빌드에 임베드되었거나 같은 폴더에 존재해야 합니다.</p>
+
+  <fieldset>
+    <legend>0) 디버그 로그</legend>
+    <pre id="dbg"></pre>
+  </fieldset>
+
+  <fieldset>
+    <legend>고정 파라미터</legend>
+    <table class="meta">
+      <tr><td>PK_ROW</td><td><code class="k" id="v_row">1024</code></td></tr>
+      <tr><td>PK_COL</td><td><code class="k" id="v_col">1025</code></td></tr>
+      <tr><td>PK_Q</td><td><code class="k" id="v_q">163603459</code></td></tr>
+      <tr><td>Q_TOT</td><td><code class="k" id="v_qtot">12289</code></td></tr>
+      <tr><td>Sigma</td><td><code class="k" id="v_sigma">10.0</code></td></tr>
+      <tr><td>Base Path (wasm/data 위치)</td><td><input id="base_path" type="text" value="./" /></td></tr>
+    </table>
+    <div style="margin-top:10px;">
+      <span id="initStatus" class="muted">초기화 대기중…</span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>암호화 (bit=32 고정)</legend>
+    <div class="row">
+      <div><label>평문 정수 (int32)</label><input id="msg" type="number" value="42" /></div>
+      <div><label>bit</label><input type="text" value="32 (고정)" disabled /></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      <button id="btnEnc" disabled>Encrypt</button>
+      <button id="btnSaveBin" disabled>바이너리 저장(1056×4)</button>
+      <button id="btnCopy" disabled>문자열 복사</button>
+    </div>
+    <div id="encStatus" class="muted" style="margin-top:8px;"></div>
+    <label style="margin-top:12px;display:block;">문자열 결과 (디버깅/검증용)</label>
+    <pre id="out"></pre>
+  </fieldset>
+
+<script>
+(() => {
+  const dbg = document.getElementById('dbg');
+  const log = (...a)=>{ console.log(...a); dbg.textContent += a.join(' ')+'\n'; };
+  const logErr = (...a)=>{ console.error(...a); dbg.textContent += '[ERR] '+a.join(' ')+'\n'; };
+
+  const C = { PK_ROW:1024, PK_COL:1025, PK_Q:163603459, Q_TOT:12289, SIGMA:10.0, BIT:32 };
+  const $ = id => document.getElementById(id);
+  const initStatus=$('initStatus'), encStatus=$('encStatus');
+  const btnEnc=$('btnEnc'), btnSaveBin=$('btnSaveBin'), btnCopy=$('btnCopy');
+  let BASE_PATH='./', ModuleInstance=null;
+
+  const urlJoin=(b,f)=>(b.endsWith('/')?b:b+'/')+f;
+
+  async function loadModule() {
+    if (ModuleInstance) return ModuleInstance;
+
+    // createFHE16 존재 확인 (빌드 플래그 점검)
+    if (!window.createFHE16) {
+      logErr('createFHE16 없음. emcc 빌드에 -sMODULARIZE=1 -sEXPORT_NAME=createFHE16 넣었는지 확인');
+      throw new Error('createFHE16 not found');
+    }
+
+    const locate=(p)=> urlJoin(BASE_PATH, p);
+    const mod = await window.createFHE16({
+      locateFile: locate,
+      print: (t)=>log('[wasm]',t),
+      printErr:(t)=>logErr('[wasm]',t)
+    });
+    ModuleInstance = mod;
+    return mod;
+  }
+
+  function fsIsFile(m,p){ try{ return m.FS.isFile(m.FS.stat(p).mode);}catch{return false;} }
+  function fsSize(m,p){ try{ return m.FS.stat(p).size;}catch{return 0;} }
+
+
+
+	 async function tryLoadPk(m) {
+    // A) 먼저, 이미 임베드/프리로드 되어 VFS에 있는 경우 시도 (FS 없어도 rc 확인 가능)
+    try {
+      const rc0 = m._FHE16_load_pk_from_fs('/pk.bin');
+      if (rc0 > 0) {
+        let sz = 1049600 * 4; // 1024*1025*4 (추정값)
+        try { if (m.FS && m.FS.stat) sz = m.FS.stat('/pk.bin').size; } catch {}
+        return { where: '/pk.bin', bytes: sz, via: 'embed' };
+      }
+    } catch (_) {}
+
+    // B) HTTP로 pk.bin을 가져와서
+    const cands = [
+      (BASE_PATH.endsWith('/') ? BASE_PATH : BASE_PATH + '/') + 'pk.bin',
+      'pk.bin',
+      'assets/pk.bin',
+      '../assets/pk.bin',
+      '/assets/pk.bin',
+    ];
+
+    for (const u of cands) {
+      try {
+        log('try fetch pk:', u);
+        const r = await fetch(u, { cache: 'no-store' });
+        if (!r.ok) continue;
+
+        const buf = await r.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const nints = bytes.byteLength >>> 2; // int32 개수
+        if (nints !== 1024 * 1025) {
+          logErr('경고: pk.bin int 개수 불일치', nints, 'expected', 1024 * 1025);
+        }
+
+        // B-1) FS가 있고 writeFile이 있으면 VFS로 올려서 기존 로더 사용
+        if (m.FS && typeof m.FS.writeFile === 'function') {
+          try { m.FS.unlink('/pk.bin'); } catch {}
+          m.FS.writeFile('/pk.bin', bytes, { canOwn: true });
+          const rc = m._FHE16_load_pk_from_fs('/pk.bin');
+          log('load_pk rc=', rc, 'bytes=', bytes.byteLength);
+          if (rc > 0) return { where: u, bytes: bytes.byteLength, via: 'http->vfs' };
+        }
+
+        // B-2) FS가 없거나 축소되어 있으면: WASM 힙으로 직접 복사 → FHE16_set_pk 호출
+        const ptr = m._malloc(bytes.byteLength);
+        m.HEAP8.set(bytes, ptr);
+        m._FHE16_set_pk(ptr, nints);
+        m._free(ptr);
+        log('set_pk via direct heap ✅, bytes=', bytes.byteLength);
+        return { where: u, bytes: bytes.byteLength, via: 'direct' };
+
+      } catch (e) {
+        logErr('fetch/set pk err:', u, e?.message || e);
+      }
+    }
+
+    throw new Error('pk.bin을 어디서도 찾지 못했습니다');
+  }
+
+
+
+  async function initAll() {
+    try {
+      BASE_PATH = $('base_path').value || './';
+      log('Init start. BASE_PATH=', BASE_PATH);
+      initStatus.textContent = '모듈 로드 중...';
+      const m = await loadModule();
+
+      // 파라미터 세팅
+      m._FHE16_init_params(C.PK_ROW, C.PK_COL, C.PK_Q, C.Q_TOT, C.SIGMA);
+      log('params set:', JSON.stringify(C));
+
+      // pk 로드
+      initStatus.textContent = 'PK 로딩 중...';
+      const info = await tryLoadPk(m);
+
+      initStatus.textContent = `초기화 완료 ✅ (pk=${info.where}, size=${info.bytes}, via=${info.via})`;
+      initStatus.className = 'ok';
+      btnEnc.disabled = btnSaveBin.disabled = btnCopy.disabled = false;
+    } catch (e) {
+      initStatus.textContent = '초기화 실패: ' + (e?.message || e);
+      initStatus.className = 'err';
+      logErr('init fail:', e?.stack || e);
+      btnEnc.disabled = btnSaveBin.disabled = btnCopy.disabled = true;
+    }
+  }
+
+  // 자동 초기화
+  window.addEventListener('load', () => { initAll(); });
+
+  // Base Path 변경 시 재초기화(경로 바꿔 테스트할 때)
+  $('base_path').addEventListener('change', () => { ModuleInstance=null; dbg.textContent=''; initStatus.className='muted'; initAll(); });
+
+  // Encrypt (문자열)
+  btnEnc.addEventListener('click', async () => {
+    encStatus.textContent='암호화 중...'; encStatus.className='muted'; $('out').textContent='';
+    try{
+      const m = ModuleInstance || await loadModule();
+      const INT32_MIN=-2147483648, INT32_MAX=2147483647;
+      let msg = Number($('msg').value);
+      if (!Number.isFinite(msg) || msg%1!==0 || msg<INT32_MIN || msg>INT32_MAX) throw new Error('msg는 int32 정수');
+      const bit = C.BIT; // 32 고정
+
+      const p = m._FHE16_ENC_WASM(msg|0, bit|0);
+      if (!p) throw new Error('WASM 메모리 실패');
+      const s = m.UTF8ToString(p);
+      m._FHE16_free(p);
+
+      $('out').textContent = s;
+      encStatus.textContent='완료 ✅'; encStatus.className='ok';
+    }catch(e){
+      encStatus.textContent = '오류: ' + (e?.message || e); encStatus.className='err';
+      logErr('enc err:', e?.stack || e);
+    }
+  });
+
+  // 바이너리 저장 (1056*4 bytes)
+  btnSaveBin.addEventListener('click', async () => {
+    try{
+      const m = ModuleInstance || await loadModule();
+      let msg = Number($('msg').value);
+      const bit = C.BIT; // 32 고정
+      const out_ptr_buf = m._malloc(4);
+      const out_len_buf = m._malloc(4);
+      const nElems = m._FHE16_ENC_BIN(msg|0, bit|0, out_ptr_buf, out_len_buf);
+      if (!nElems) throw new Error('ENC_BIN 실패');
+      const ptr = m.getValue(out_ptr_buf, '*');
+      const nbytes = m.getValue(out_len_buf, 'i32');
+      const bin = new Uint8Array(m.HEAPU8.subarray(ptr, ptr + nbytes));
+
+      const blob = new Blob([bin], {type:'application/octet-stream'});
+      const a=document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `ct-${Date.now()}-1056x4.bin`;
+      document.body.appendChild(a); a.click(); a.remove();
+
+      m._FHE16_free(ptr);
+      m._free(out_ptr_buf); m._free(out_len_buf);
+      encStatus.textContent = `바이너리 저장 완료 (${nElems} ints, ${nbytes} bytes) ✅`; encStatus.className='ok';
+    }catch(e){
+      encStatus.textContent = '바이너리 저장 오류: ' + (e?.message || e); encStatus.className='err';
+      logErr('save bin err:', e?.stack || e);
+    }
+  });
+
+  // 복사
+  $('btnCopy').addEventListener('click', async () => {
+    const s = $('out').textContent || '';
+    try { await navigator.clipboard.writeText(s); encStatus.textContent='복사됨 ✅'; encStatus.className='ok'; }
+    catch { encStatus.textContent='복사 실패'; encStatus.className='err'; }
+  });
+})();
+</script>
+</body>
+</html>
+
