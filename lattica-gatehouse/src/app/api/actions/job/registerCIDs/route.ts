@@ -421,6 +421,8 @@ export async function POST(req: NextRequest) {
     return cors(NextResponse.json({
       transaction: Buffer.from(serializedTx).toString('base64'),
       message: `Successfully registered ${cids.length} CID handle(s)`,
+      cid_pdas: cids.map(c => c.cid_pda), // Add CID PDAs for frontend use
+      registration_id: registration.reg_id,
     }))
   } catch (e: unknown) {
     log.error('Register CIDs error', e)
