@@ -227,10 +227,15 @@ export default function DemoPage() {
 
       setRegTxSig(signature)
 
-      // Extract CID PDAs from transaction response
-      // In production, parse from on-chain events or logs
-      const cid1 = 'EdYKeQKiJb98TA1FGbWnqUr15JcH3AktZA3dG5tJebNfAG'
-      const cid2 = '861kytEJGJdHGvW6WBZRamGCbJ1cjaMwwbFr83xUHHbLRS'
+      // Extract CID PDAs from API response
+      const cidPdas = data.cid_pdas || []
+      if (cidPdas.length < 2) {
+        addLog('⚠️ Expected 2 CIDs but got ' + cidPdas.length)
+        return
+      }
+
+      const cid1 = cidPdas[0]
+      const cid2 = cidPdas[1]
 
       addLog('✅ CID 1: ' + cid1)
       addLog('✅ CID 2: ' + cid2)
