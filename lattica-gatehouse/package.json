@@ -1,15 +1,19 @@
 {
   "name": "lattica-gatehouse",
-  "scripts": {
+   "scripts": {
+   "dev": "LD_PRELOAD=/lib/x86_64-linux-gnu/libjemalloc.so.2 node ./FHE16/dev-init.js && LD_PRELOAD=/lib/x86_64-linux-gnu/libjemalloc.so.2 next dev",
     "build": "next build",
     "ci": "npm run build && npm run lint && npm run format:check",
-    "dev": "next dev --turbopack",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "next lint",
     "start": "next start"
-  },
-  "description": "Next.js, Tailwind, gill (based on @solana/kit), Wallet UI",
+  },  
+
+
+
+
+   "description": "Next.js, Tailwind, gill (based on @solana/kit), Wallet UI",
   "keywords": [
     "gill",
     "nextjs",
