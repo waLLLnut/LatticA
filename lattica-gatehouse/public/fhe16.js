@@ -80,6 +80,18 @@ Module['ready'] = new Promise(function(resolve, reject) {
       }
     
 
+      if (!Object.getOwnPropertyDescriptor(Module['ready'], '_DEC')) {
+        Object.defineProperty(Module['ready'], '_DEC', { configurable: true, get: function() { abort('You are getting _DEC on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+        Object.defineProperty(Module['ready'], '_DEC', { configurable: true, set: function() { abort('You are setting _DEC on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+      }
+    
+
+      if (!Object.getOwnPropertyDescriptor(Module['ready'], '_FHE16_DEC')) {
+        Object.defineProperty(Module['ready'], '_FHE16_DEC', { configurable: true, get: function() { abort('You are getting _FHE16_DEC on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+        Object.defineProperty(Module['ready'], '_FHE16_DEC', { configurable: true, set: function() { abort('You are setting _FHE16_DEC on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
+      }
+    
+
       if (!Object.getOwnPropertyDescriptor(Module['ready'], '___stdio_exit')) {
         Object.defineProperty(Module['ready'], '___stdio_exit', { configurable: true, get: function() { abort('You are getting ___stdio_exit on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
         Object.defineProperty(Module['ready'], '___stdio_exit', { configurable: true, set: function() { abort('You are setting ___stdio_exit on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js') } });
@@ -5292,6 +5304,12 @@ var _malloc = Module["_malloc"] = createExportWrapper("malloc");
 
 /** @type {function(...*):?} */
 var _FHE16_ENC_BIN = Module["_FHE16_ENC_BIN"] = createExportWrapper("FHE16_ENC_BIN");
+
+/** @type {function(...*):?} */
+var _DEC = Module["_DEC"] = createExportWrapper("DEC");
+
+/** @type {function(...*):?} */
+var _FHE16_DEC = Module["_FHE16_DEC"] = createExportWrapper("FHE16_DEC");
 
 /** @type {function(...*):?} */
 var _FHE16_free = Module["_FHE16_free"] = createExportWrapper("FHE16_free");
