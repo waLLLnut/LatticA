@@ -1,3 +1,9 @@
 fhe_executer/include/
 fhe_executer/lib/
 
+# FHE executor files
+fhe_executor/node_modules/
+fhe_executor/FHE16/node_modules/
+fhe_executor/FHE16/store/*.bin
+fhe_executor/FHE16/store/boot/*.bin
+

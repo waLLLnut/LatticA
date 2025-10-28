@@ -1,0 +1,19 @@
+{
+  "name": "fhe16",
+  "version": "0.1.0",
+  "description": "Thin Node-FFI wrapper for libFHE16.so",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "UNLICENSED",
+  "private": true,
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "lib/"
+  ],
+  "dependencies": {
+    "ffi-napi": "^4.0.3",
+    "ref-napi": "^3.0.3"
+  }
+}
+

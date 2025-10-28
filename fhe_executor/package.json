@@ -1,0 +1,17 @@
+{
+  "name": "fhe-executor",
+  "version": "0.1.0",
+  "description": "FHE Job Executor Server",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node ./FHE16/dev-init.js && node server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ffi-napi": "^4.0.3",
+    "ref-napi": "^3.0.3"
+  },
+  "devDependencies": {},
+  "license": "UNLICENSED",
+  "private": true
+}
