@@ -709,6 +709,127 @@ function generateDeterministicCID(jobPda, operations) {
   return 'CID_' + hash.digest('hex').substring(0, 32);
 }
 
+// Fetch decrypt jobs from gatehouse
+async function fetchDecryptJobs() {
+  return new Promise((resolve, reject) => {
+    const req = http.request(`${GATEHOUSE_URL}/api/executor/decrypt-jobs?limit=1`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const result = JSON.parse(data);
+          resolve(result);
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// Submit decrypt result
+async function submitDecryptResult(decryptId, success, decryptedValue = null, error = null) {
+  return new Promise((resolve, reject) => {
+    const payload = {
+      executor: EXECUTOR_ID,
+      success,
+      decrypted_value: decryptedValue,
+      error
+    };
+
+    const postData = JSON.stringify(payload);
+    const req = http.request(`${GATEHOUSE_URL}/api/executor/decrypt-jobs/${decryptId}/result`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const result = JSON.parse(data);
+          resolve(result);
+        } catch (e) {
+          reject(e);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
+// Poll and process decrypt jobs
+async function pollForDecryptJobs() {
+  try {
+    const jobsData = await fetchDecryptJobs();
+
+    if (!jobsData || !jobsData.jobs || jobsData.jobs.length === 0) {
+      return;
+    }
+
+    const job = jobsData.jobs[0];
+    const decryptId = job.decrypt_id;
+    const cid = job.cid;
+
+    logger.info('Decrypt:Polling', 'Decrypt job found', { 
+      decrypt_id: decryptId.slice(0, 16) + '...',
+      cid: cid.slice(0, 8) + '...'
+    });
+
+    try {
+      // Extract ciphertext data
+      let ctData;
+      if (job.ciphertext && typeof job.ciphertext === 'object') {
+        if (job.ciphertext.encrypted_data && job.ciphertext.encrypted_data.encrypted_data) {
+          ctData = job.ciphertext.encrypted_data.encrypted_data;
+        } else if (job.ciphertext.encrypted_data) {
+          ctData = job.ciphertext.encrypted_data;
+        } else {
+          throw new Error('Invalid ciphertext format');
+        }
+      } else {
+        throw new Error('Missing ciphertext data');
+      }
+
+      // Convert to Int32Ptr
+      const ctPtr = convertJSONToInt32Ptr(ctData);
+      
+      // Decrypt using secret key
+      if (!secretKey) {
+        throw new Error('Secret key not available');
+      }
+
+      const decryptedValue = FHE16.decInt(ctPtr, secretKey);
+      
+      logger.demo('Decrypt:Demo', 'DECRYPTED VALUE FOR UI', { value: decryptedValue, cid: cid.slice(0, 8) + '...' });
+
+      // Submit result
+      await submitDecryptResult(decryptId, true, decryptedValue);
+      
+      logger.info('Decrypt:Result', 'Decrypt job completed', { 
+        decrypt_id: decryptId.slice(0, 16) + '...',
+        value: decryptedValue 
+      });
+
+    } catch (error) {
+      logger.error('Decrypt:Processing', 'Decryption failed', { error: error.message });
+      await submitDecryptResult(decryptId, false, null, error.message);
+    }
+
+  } catch (error) {
+    // Silently ignore polling errors (gatehouse might be unavailable)
+  }
+}
+
 // Main polling loop
 async function pollForJobs() {
   if (isProcessing) {
@@ -795,9 +916,11 @@ async function start() {
 
   logger.info('Job:Polling', 'Starting job polling', { interval_sec: POLL_INTERVAL/1000 });
   setInterval(pollForJobs, POLL_INTERVAL);
+  setInterval(pollForDecryptJobs, POLL_INTERVAL);
 
   // Initial poll
   setTimeout(pollForJobs, 1000);
+  setTimeout(pollForDecryptJobs, 1500);
 }
 
 // Handle graceful shutdown

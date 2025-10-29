@@ -732,11 +732,18 @@ export default function DemoPage() {
                         if (operation === 'deposit') {
                           // Update SOL balance ciphertext (CID stays the same)
                           setCiphertext1(cidData.ciphertext)
-                          addLog(` ✓ SOL balance ciphertext updated`)
+                          setSolBalanceState('encrypted') // Re-encrypt visual state
+                          addLog(` ✓ SOL balance ciphertext updated (re-encrypted)`)
                         } else if (operation === 'borrow') {
                           // Update USDC balance ciphertext (CID stays the same)
                           setCiphertext4(cidData.ciphertext)
-                          addLog(` ✓ USDC balance ciphertext updated`)
+                          setUsdcBalanceState('encrypted') // Re-encrypt visual state
+                          addLog(` ✓ USDC balance ciphertext updated (re-encrypted)`)
+                        } else if (operation === 'withdraw') {
+                          // Update USDC balance ciphertext (CID stays the same)
+                          setCiphertext4(cidData.ciphertext)
+                          setUsdcBalanceState('encrypted') // Re-encrypt visual state
+                          addLog(` ✓ USDC balance ciphertext updated (re-encrypted)`)
                         }
                       }
                       
@@ -816,59 +823,57 @@ export default function DemoPage() {
     }
 
     try {
-      addLog(' Requesting result decryption via KMS...')
-      addLog(' In production: KMS threshold decryption of result ciphertext')
+      addLog(' Requesting result decryption...')
+      addLog(` [Executor] Submitting decrypt request for result CID: ${resultCidPda.slice(0, 8)}...`)
       
-      addLog(' [Simulated KMS] Performing threshold decryption...')
-      addLog(' [Simulated KMS] Validating user permissions...')
-      addLog(' [Simulated KMS] Combining threshold shares...')
+      const response = await fetch('/api/actions/decrypt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cid: resultCidPda,
+          requester: publicKey?.toBase58() || 'demo'
+        })
+      })
       
-      // Get the actual result using CID-based retrieval
-      try {
-        if (!resultCidPda) {
-          throw new Error('No result CID available')
-        }
-
-        addLog(' [Simulated KMS] Accessing result ciphertext via CID...')
-        addLog(` [Simulated KMS] Fetching CID: ${resultCidPda}`)
-        
-        // Fetch result ciphertext by CID handle
-        const cidResponse = await fetch(`/api/ciphertext/${resultCidPda}`)
-        
-        if (!cidResponse.ok) {
-          throw new Error(`Failed to fetch result CID: ${cidResponse.status}`)
-        }
-        
-        const cidData = await cidResponse.json()
-        addLog(' [Simulated KMS] Result ciphertext retrieved')
-        addLog(' [Simulated KMS] Performing threshold decryption...')
-        
-        // Use ONLY the actual computation result from FHE executor
-        const actualResult = cidData.computation_result
-        
-        if (actualResult === undefined || actualResult === null) {
-          addLog(` No computation result available from FHE executor`)
-          addLog(` FHE computation may have failed or result not stored`)
-          setDecryptedResult('ERROR: No FHE result')
-          return
-        }
-        
-        setDecryptedResult(String(actualResult))
-        addLog(` FHE computation result: ${actualResult}`)
-        addLog(' Pure result from homomorphic computation engine')
-        
-        if (cidData.computation_description) {
-          addLog(` Computation: ${cidData.computation_description}`)
-        }
-        
-      } catch (error) {
-        addLog(` CID-based decryption failed: ${error}`)
-        addLog(` Cannot retrieve FHE computation result`)
-        setDecryptedResult('ERROR: Decryption failed')
+      if (!response.ok) {
+        throw new Error('Decrypt request failed')
       }
       
+      const data = await response.json()
+      const decryptId = data.decrypt_id
+      addLog(` [Executor] Decrypt job created: ${decryptId.slice(0, 16)}...`)
+      addLog(' [Executor] Waiting for executor to decrypt...')
+      
+      // Poll for result
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusResponse = await fetch(`/api/actions/decrypt?decrypt_id=${decryptId}`)
+          const statusData = await statusResponse.json()
+          
+          if (statusData.status === 'completed') {
+            clearInterval(pollInterval)
+            setDecryptedResult(String(statusData.decrypted_value))
+            addLog(` FHE computation result decrypted: ${statusData.decrypted_value}`)
+            addLog(' Pure result from homomorphic computation engine')
+          } else if (statusData.status === 'failed') {
+            clearInterval(pollInterval)
+            addLog(` Decryption failed: ${statusData.error}`)
+            setDecryptedResult('ERROR: Decryption failed')
+          }
+        } catch (error) {
+          // Continue polling
+        }
+      }, 1000)
+      
+      // Timeout after 30s
+      setTimeout(() => {
+        clearInterval(pollInterval)
+        addLog(' Decryption timeout')
+      }, 30000)
+      
     } catch (error) {
-      addLog(` Decryption failed: ${error}`)
+      addLog(` Decryption failed: ${error instanceof Error ? error.message : String(error)}`)
+      setDecryptedResult('ERROR: Decryption failed')
     }
   }
 
@@ -910,13 +915,56 @@ export default function DemoPage() {
                 )}
                 {solBalanceState === 'encrypted' && (
                   <button
-                    onClick={() => {
-                      addLog(' Decrypting SOL balance...')
-                      addLog(` [KMS] Requesting decryption for CID: ${confidentialSOLCid || 'Unknown'}`)
-                      setTimeout(() => {
-                        setSolBalanceState('decrypted')
-                        addLog(' SOL balance decrypted')
-                      }, 1500)
+                    onClick={async () => {
+                      if (!confidentialSOLCid) {
+                        addLog(' No SOL balance CID available')
+                        return
+                      }
+                      try {
+                        addLog(' Decrypting SOL balance...')
+                        addLog(` [Executor] Submitting decrypt request for CID: ${confidentialSOLCid.slice(0, 8)}...`)
+                        
+                        const response = await fetch('/api/actions/decrypt', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            cid: confidentialSOLCid,
+                            requester: publicKey?.toBase58() || 'demo'
+                          })
+                        })
+                        
+                        if (!response.ok) throw new Error('Decrypt request failed')
+                        
+                        const data = await response.json()
+                        const decryptId = data.decrypt_id
+                        addLog(` [Executor] Decrypt job created: ${decryptId.slice(0, 16)}...`)
+                        addLog(' [Executor] Waiting for executor to decrypt...')
+                        
+                        // Poll for result
+                        const pollInterval = setInterval(async () => {
+                          try {
+                            const statusResponse = await fetch(`/api/actions/decrypt?decrypt_id=${decryptId}`)
+                            const statusData = await statusResponse.json()
+                            
+                            if (statusData.status === 'completed') {
+                              clearInterval(pollInterval)
+                              setConfidentialSOL(statusData.decrypted_value)
+                              setSolBalanceState('decrypted')
+                              addLog(` SOL balance decrypted: ${statusData.decrypted_value}`)
+                            } else if (statusData.status === 'failed') {
+                              clearInterval(pollInterval)
+                              addLog(` Decryption failed: ${statusData.error}`)
+                            }
+                          } catch (error) {
+                            // Continue polling
+                          }
+                        }, 1000)
+                        
+                        // Timeout after 30s
+                        setTimeout(() => clearInterval(pollInterval), 30000)
+                      } catch (error) {
+                        addLog(` Error: ${error instanceof Error ? error.message : String(error)}`)
+                      }
                     }}
                     style={{
                       padding: '1px 4px',
@@ -953,13 +1001,56 @@ export default function DemoPage() {
                 )}
                 {usdcBalanceState === 'encrypted' && (
                   <button
-                    onClick={() => {
-                      addLog(' Decrypting USDC balance...')
-                      addLog(` [KMS] Requesting decryption for CID: ${confidentialUSDCCid || 'Unknown'}`)
-                      setTimeout(() => {
-                        setUsdcBalanceState('decrypted')
-                        addLog(' USDC balance decrypted')
-                      }, 1500)
+                    onClick={async () => {
+                      if (!confidentialUSDCCid) {
+                        addLog(' No USDC balance CID available')
+                        return
+                      }
+                      try {
+                        addLog(' Decrypting USDC balance...')
+                        addLog(` [Executor] Submitting decrypt request for CID: ${confidentialUSDCCid.slice(0, 8)}...`)
+                        
+                        const response = await fetch('/api/actions/decrypt', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            cid: confidentialUSDCCid,
+                            requester: publicKey?.toBase58() || 'demo'
+                          })
+                        })
+                        
+                        if (!response.ok) throw new Error('Decrypt request failed')
+                        
+                        const data = await response.json()
+                        const decryptId = data.decrypt_id
+                        addLog(` [Executor] Decrypt job created: ${decryptId.slice(0, 16)}...`)
+                        addLog(' [Executor] Waiting for executor to decrypt...')
+                        
+                        // Poll for result
+                        const pollInterval = setInterval(async () => {
+                          try {
+                            const statusResponse = await fetch(`/api/actions/decrypt?decrypt_id=${decryptId}`)
+                            const statusData = await statusResponse.json()
+                            
+                            if (statusData.status === 'completed') {
+                              clearInterval(pollInterval)
+                              setConfidentialUSDC(statusData.decrypted_value)
+                              setUsdcBalanceState('decrypted')
+                              addLog(` USDC balance decrypted: ${statusData.decrypted_value}`)
+                            } else if (statusData.status === 'failed') {
+                              clearInterval(pollInterval)
+                              addLog(` Decryption failed: ${statusData.error}`)
+                            }
+                          } catch (error) {
+                            // Continue polling
+                          }
+                        }, 1000)
+                        
+                        // Timeout after 30s
+                        setTimeout(() => clearInterval(pollInterval), 30000)
+                      } catch (error) {
+                        addLog(` Error: ${error instanceof Error ? error.message : String(error)}`)
+                      }
                     }}
                     style={{
                       padding: '1px 4px',

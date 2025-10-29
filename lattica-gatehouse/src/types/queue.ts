@@ -66,3 +66,18 @@ export interface JobExecutionResult {
   completed_at: number
 }
 
+/**
+ * Decrypt job (for demo decryption requests)
+ */
+export interface DecryptJob {
+  decrypt_id: string                     // Unique decrypt job ID
+  cid: string                            // CID to decrypt
+  requester: string                      // Requester pubkey
+  requested_at: number                   // Unix timestamp
+  status: 'pending' | 'processing' | 'completed' | 'failed'
+  executor?: string                      // Assigned executor
+  decrypted_value?: number               // Decrypted result
+  error?: string
+  completed_at?: number
+}
+
