@@ -23,6 +23,7 @@ class Logger {
       info: '\x1b[32m',     // Green
       warn: '\x1b[33m',     // Yellow
       error: '\x1b[31m',    // Red
+      demo: '\x1b[31m',     // Red (for demo visualization only)
       
       // Component color
       component: '\x1b[35m', // Magenta
@@ -62,6 +63,10 @@ class Logger {
 
   error(component, message, context) {
     console.error(this.format('error', component, message, context));
+  }
+
+  demo(component, message, context) {
+    console.log(this.format('demo', component, message, context));
   }
 }
 
@@ -487,12 +492,12 @@ async function executeUniversalFHEComputation(operation, inputData) {
       resultArray.push(resultBuffer.readInt32LE(i * 4));
     }
 
-    // DEMO ONLY: Decrypt result for debugging
+    // DEMO ONLY: Decrypt result for debugging (visualization purposes only)
     let decryptedResult = null;
     if (secretKey) {
       try {
         decryptedResult = FHE16.decInt(finalResult, secretKey);
-        logger.debug('FHE:Debug', 'Result decrypted', { value: decryptedResult });
+        logger.demo('FHE:Demo', `DECRYPTED RESULT >>> \x1b[1m\x1b[33m${decryptedResult}\x1b[0m\x1b[31m <<< (Demo visualization only)`);
       } catch (decError) {
         logger.warn('FHE:Debug', 'Decryption failed', { error: decError.message });
       }
@@ -652,12 +657,12 @@ async function performFHEComputation(program, ct1Data, ct2Data, ct3Data = null) 
       resultArray.push(resultBuffer.readInt32LE(i * 4));
     }
 
-    // Decrypt for debugging
+    // DEMO ONLY: Decrypt for visualization purposes only
     let decryptedResult = null;
     if (secretKey) {
       try {
         decryptedResult = FHE16.decInt(resultPtr, secretKey);
-        logger.debug('FHE:Debug', 'Result decrypted', { value: decryptedResult, operation: operation.name });
+        logger.demo('FHE:Demo', `DECRYPTED RESULT >>> \x1b[1m\x1b[33m${decryptedResult}\x1b[0m\x1b[31m <<< (Demo visualization only)`, { operation: program.scenario });
       } catch (decError) {
         logger.warn('FHE:Debug', 'Decryption failed', { error: decError.message });
       }
@@ -667,7 +672,7 @@ async function performFHEComputation(program, ct1Data, ct2Data, ct3Data = null) 
       encrypted_data: resultArray,
       scheme: 'FHE16_0.0.1v',
       timestamp: Date.now(),
-      operation: operation.name,
+      operation: program.scenario,
       debug_decrypted_result: decryptedResult
     };
 

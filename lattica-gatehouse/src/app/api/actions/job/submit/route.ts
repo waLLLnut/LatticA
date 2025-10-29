@@ -12,6 +12,7 @@ import {
 } from '@solana/web3.js'
 import { createLogger } from '@/lib/logger'
 import { cidValidator } from '@/services/validation/cid-validator'
+import { ciphertextStore } from '@/services/storage/ciphertext-store'
 import {
   hex32,
   calcCidSetId,
@@ -486,13 +487,15 @@ export async function POST(req: NextRequest) {
     // Policy hash & validation
     const policy_hash = calcPolicyHash(policy_ctx)
 
-    // CID validation: must be confirmed on-chain
+    // CID validation: all CIDs must be confirmed on-chain or in pending store
+    // State CIDs may have provenance='executor' if updated by executor, but they're still registered CIDs
     const validation = cidValidator.validate_cids(parsedCids, {
       require_confirmed: true,
       allow_pending: false,
       check_expiry: true,
       check_owner: false,
     })
+    
     if (!validation.all_valid) {
       const failedDetails = validation.results
         .filter((r: any) => !r.valid)
@@ -625,7 +628,7 @@ export async function POST(req: NextRequest) {
       }
     } catch (e) {
       // Non-fatal: some valid txs may fail simulation in certain environments
-      log.warn('Simulation attempt failed (continuing)', e)
+      log.warn('Simulation attempt failed (continuing)', { error: e instanceof Error ? e.message : String(e) })
     }
 
     // Serialize (unsigned)

@@ -114,46 +114,72 @@ export async function POST(
         )
       }
       
-      const hash = createHash('sha256')
-        .update(job_pda)
-        .update('FHE_RESULT')
-        .update(Date.now().toString())
-        .digest()
+      // Determine which state CID to update based on operation
+      // deposit: update input[0] (SOL balance)
+      // withdraw: update input[0] (USDC balance)  
+      // borrow: update input[2] (USDC balance)
+      // defi_operation: dynamic (2 inputs=withdraw, 3 inputs=borrow)
+      const irDigest = job.ir_digest || ''
+      const inputCount = job.cid_handles?.length || 0
+      let stateCidToUpdate: string | undefined
       
-      resultHandle = bs58.encode(hash)
+      if (irDigest === '0xadd0000000000000000000000000000000000000000000000000000000000000') {
+        // deposit operation: update SOL balance (input[0])
+        stateCidToUpdate = job.cid_handles?.[0]
+      } else if (irDigest === '0xwithdrw000000000000000000000000000000000000000000000000000000000') {
+        // withdraw operation: update USDC balance (input[0])
+        stateCidToUpdate = job.cid_handles?.[0]
+      } else if (irDigest === '0xmul0000000000000000000000000000000000000000000000000000000000000') {
+        // borrow operation: update USDC balance (input[2])
+        stateCidToUpdate = job.cid_handles?.[2]
+      } else if (irDigest === '0x8fae5df19cb6bc3db4ea7dfc14a9696be683910c9fee64d839a6eef9981129a1') {
+        // defi_operation: dynamic based on input count
+        if (inputCount === 2) {
+          // withdraw: update USDC balance (input[0])
+          stateCidToUpdate = job.cid_handles?.[0]
+        } else if (inputCount === 3) {
+          // borrow: update USDC balance (input[2])
+          stateCidToUpdate = job.cid_handles?.[2]
+        }
+      }
+      
+      if (!stateCidToUpdate) {
+        log.error('Cannot determine state CID to update', {
+          job: job_pda.slice(0, 8) + '...',
+          ir_digest: irDigest,
+          cid_count: job.cid_handles?.length
+        })
+        return NextResponse.json(
+          { error: 'Cannot determine state CID to update' },
+          { status: 500 }
+        )
+      }
       
       try {
-        // Store result ciphertext with proper metadata
-        ciphertextStore.store_ciphertext(
-          resultHandle,
-          body.result_ciphertext,
-          'hash_' + Date.now(), // Simple hash for demo
-          {
-            scheme: body.result_ciphertext.scheme || 'FHE16_0.0.1v',
-            operation: body.result_ciphertext.operation || 'unknown'
-          },
-          {
-            allow: ['decrypt'],
-            version: '1.0',
-            decrypt_by: 'public'
-          },
-          'policy_hash_' + Date.now(),
-          'system', // System-generated result
-          resultHandle,
-          'executor'
+        // Update the state CID's ciphertext content
+        const updateSuccess = ciphertextStore.update_ciphertext_content(
+          stateCidToUpdate,
+          body.result_ciphertext
         )
         
-        // Mark as confirmed since it's executor-generated
-        ciphertextStore.update_verification(resultHandle, 'confirmed', 'executor_result', Date.now())
+        if (!updateSuccess) {
+          throw new Error('Failed to update state CID')
+        }
         
-        log.info('Result ciphertext stored', {
+        resultHandle = stateCidToUpdate  // Return the updated state CID
+        
+        log.info('State CID updated with executor result', {
           job: job_pda.slice(0, 8) + '...',
-          result_handle: resultHandle,
+          state_cid: stateCidToUpdate.slice(0, 8) + '...',
+          ir_digest: irDigest.slice(0, 10) + '...',
           ciphertext_size: JSON.stringify(body.result_ciphertext).length,
         })
       } catch (storeError) {
-        log.error('Failed to store result ciphertext', storeError)
-        // Continue anyway - return the handle for tracking
+        log.error('Failed to update state CID', storeError)
+        return NextResponse.json(
+          { error: 'Failed to update state CID' },
+          { status: 500 }
+        )
       }
       
       updateSuccess = jobQueue.complete_job(job_pda, resultHandle)

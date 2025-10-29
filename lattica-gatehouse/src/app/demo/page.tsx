@@ -300,102 +300,42 @@ export default function DemoPage() {
   }
 
   const handleEncryptForOperation = async () => {
-    addLog(`Encrypting values for ${operation} operation...`)
+    addLog(`Encrypting transaction input for ${operation} operation...`)
     
-    // Check if confidential state needs to be fetched from store
-    let ctSOL = null
-    let ctUSDC = null
-    
-    // Try to fetch SOL from store (could be executor result or existing ciphertext)
-    if (confidentialSOLCid) {
-      try {
-        const response = await fetch(`/api/ciphertext/${confidentialSOLCid}`)
-        if (response.ok) {
-          const data = await response.json()
-          // Check if this is an unregistered executor result
-          if (data.verification?.status === 'confirmed' && data.metadata?.provenance === 'executor') {
-            ctSOL = data.ciphertext
-            addLog('Using executor result ciphertext for SOL')
-          } else if (data.metadata?.provenance === 'executor') {
-            ctSOL = data.ciphertext
-            addLog('Using unregistered executor result for SOL')
-          } else {
-            // Existing registered ciphertext - just use the CID reference
-            ctSOL = encryptValue(confidentialSOL)
-          }
-        } else {
-          ctSOL = encryptValue(confidentialSOL)
-        }
-      } catch (error) {
-        ctSOL = encryptValue(confidentialSOL)
-      }
-    } else {
-      ctSOL = encryptValue(confidentialSOL)
-    }
-    
-    // Try to fetch USDC from store
-    if (confidentialUSDCCid) {
-      try {
-        const response = await fetch(`/api/ciphertext/${confidentialUSDCCid}`)
-        if (response.ok) {
-          const data = await response.json()
-          // Check if this is an unregistered executor result
-          if (data.verification?.status === 'confirmed' && data.metadata?.provenance === 'executor') {
-            ctUSDC = data.ciphertext
-            addLog('Using executor result ciphertext for USDC')
-          } else if (data.metadata?.provenance === 'executor') {
-            ctUSDC = data.ciphertext
-            addLog('Using unregistered executor result for USDC')
-          } else {
-            ctUSDC = encryptValue(confidentialUSDC)
-          }
-        } else {
-          ctUSDC = encryptValue(confidentialUSDC)
-        }
-      } catch (error) {
-        ctUSDC = encryptValue(confidentialUSDC)
-      }
-    } else {
-      ctUSDC = encryptValue(confidentialUSDC)
-    }
-    
-    if (ctSOL) {
-      setCiphertext1(ctSOL)
-      setSolBalanceState('encrypted')
-    }
-    if (ctUSDC) {
-      setCiphertext4(ctUSDC)
-      setUsdcBalanceState('encrypted')
-    }
+    // Reuse existing confidential state ciphertexts (don't re-encrypt)
+    // Only encrypt the transaction input
     
     // Encrypt transaction inputs based on operation
     let transactionInputs = []
     switch (operation) {
       case 'deposit':
+        addLog(`Encrypting deposit amount: ${depositAmount}`)
         const ctDeposit = encryptValue(depositAmount)
         if (ctDeposit) {
           setCiphertext2(ctDeposit)
-          transactionInputs.push('deposit_amount')
+          transactionInputs.push(`deposit_amount=${depositAmount}`)
         }
         break
       case 'withdraw':
+        addLog(`Encrypting withdraw amount: ${withdrawAmount}`)
         const ctWithdraw = encryptValue(withdrawAmount)
         if (ctWithdraw) {
           setCiphertext5(ctWithdraw)
-          transactionInputs.push('withdraw_amount')
+          transactionInputs.push(`withdraw_amount=${withdrawAmount}`)
         }
         break
       case 'borrow':
+        addLog(`Encrypting borrow amount: ${borrowAmount}`)
         const ctBorrow = encryptValue(borrowAmount)
         if (ctBorrow) {
           setCiphertext3(ctBorrow)
-          transactionInputs.push('borrow_amount')
+          transactionInputs.push(`borrow_amount=${borrowAmount}`)
         }
         break
     }
     
-    addLog(`Confidential state encrypted: SOL, USDC`)
-    addLog(`Transaction inputs encrypted: ${transactionInputs.join(', ')}`)
+    addLog(`Transaction input encrypted: ${transactionInputs.join(', ')}`)
+    addLog(`Confidential state (SOL, USDC) will be reused from existing CIDs`)
   }
 
   const handleRegisterCIDs = async () => {
@@ -407,8 +347,6 @@ export default function DemoPage() {
     // Check required ciphertexts based on operation
     const requiredCiphertexts = []
     const isConfidentialStateInitialized = confidentialSOLCid && confidentialUSDCCid
-    let needsSOLRegistration = false
-    let needsUSDCRegistration = false
     
     switch (operation) {
       case 'deposit':
@@ -426,30 +364,10 @@ export default function DemoPage() {
           }
         }
         
-        // Check if current SOL balance needs registration (executor result)
-        if (confidentialSOLCid) {
-          try {
-            const checkResponse = await fetch(`/api/ciphertext/${confidentialSOLCid}`)
-            if (checkResponse.ok) {
-              const data = await checkResponse.json()
-              if (data.metadata?.provenance === 'executor') {
-                addLog('Detected unregistered executor result, will register with deposit amount')
-                needsSOLRegistration = true
-              }
-            }
-          } catch (error) {
-            // If check fails, assume no registration needed
-          }
-        }
-        
-        // Register both if needed, or just deposit amount
-        if (needsSOLRegistration && ciphertext1) {
-          requiredCiphertexts.push(ciphertext1, ciphertext2)
-          addLog(' Registering: SOL balance (result) + deposit amount')
-        } else {
-          requiredCiphertexts.push(ciphertext2)
-          addLog(' Reusing existing confidential SOL balance, registering deposit amount only')
-        }
+        // For deposit, only register the deposit amount
+        // Confidential SOL balance is already initialized and doesn't need re-registration
+        requiredCiphertexts.push(ciphertext2)
+        addLog(' Reusing existing confidential SOL balance, registering deposit amount only')
         break
       case 'withdraw':
         if (!ciphertext5) {
@@ -466,29 +384,10 @@ export default function DemoPage() {
           }
         }
         
-        // Check if current USDC balance needs registration (executor result)
-        if (confidentialUSDCCid) {
-          try {
-            const checkResponse = await fetch(`/api/ciphertext/${confidentialUSDCCid}`)
-            if (checkResponse.ok) {
-              const data = await checkResponse.json()
-              if (data.metadata?.provenance === 'executor') {
-                needsUSDCRegistration = true
-              }
-            }
-          } catch (error) {
-            // Ignore
-          }
-        }
-        
-        // Register both if needed, or just withdraw amount
-        if (needsUSDCRegistration && ciphertext4) {
-          requiredCiphertexts.push(ciphertext4, ciphertext5)
-          addLog(' Registering: USDC balance (result) + withdraw amount')
-        } else {
-          requiredCiphertexts.push(ciphertext5)
-          addLog(' Reusing existing confidential USDC balance, registering withdraw amount only')
-        }
+        // For withdraw, only register the withdraw amount
+        // Confidential USDC balance is already managed (either initialized or from executor results)
+        requiredCiphertexts.push(ciphertext5)
+        addLog(' Reusing existing confidential USDC balance, registering withdraw amount only')
         break
       case 'borrow':
         if (!ciphertext3) {
@@ -505,52 +404,10 @@ export default function DemoPage() {
           }
         }
         
-        // Check if SOL or USDC balance needs registration (executor results)
-        if (confidentialSOLCid) {
-          try {
-            const checkResponse = await fetch(`/api/ciphertext/${confidentialSOLCid}`)
-            if (checkResponse.ok) {
-              const data = await checkResponse.json()
-              if (data.metadata?.provenance === 'executor') {
-                needsSOLRegistration = true
-              }
-            }
-          } catch (error) {
-            // Ignore
-          }
-        }
-        
-        if (confidentialUSDCCid) {
-          try {
-            const checkResponse = await fetch(`/api/ciphertext/${confidentialUSDCCid}`)
-            if (checkResponse.ok) {
-              const data = await checkResponse.json()
-              if (data.metadata?.provenance === 'executor') {
-                needsUSDCRegistration = true
-              }
-            }
-          } catch (error) {
-            // Ignore
-          }
-        }
-        
-        if (needsSOLRegistration && needsUSDCRegistration) {
-          // Both need registration
-          requiredCiphertexts.push(ciphertext1, ciphertext3, ciphertext4)
-          addLog(' Registering: SOL balance (result) + borrow amount + USDC balance (result)')
-        } else if (needsSOLRegistration) {
-          // Only SOL needs registration
-          requiredCiphertexts.push(ciphertext1, ciphertext3)
-          addLog(' Registering: SOL balance (result) + borrow amount')
-        } else if (needsUSDCRegistration) {
-          // Only USDC needs registration - need to keep borrow first
-          requiredCiphertexts.push(ciphertext3, ciphertext4)
-          addLog(' Registering: borrow amount + USDC balance (result)')
-        } else {
-          // Only borrow amount needs registration
-          requiredCiphertexts.push(ciphertext3)
-          addLog(' Reusing existing confidential balances, registering borrow amount only')
-        }
+        // For borrow, only register the borrow amount
+        // Confidential SOL and USDC balances are already managed (either initialized or from executor results)
+        requiredCiphertexts.push(ciphertext3)
+        addLog(' Reusing existing confidential balances, registering borrow amount only')
         break
       default:
         addLog(' Unknown operation')
@@ -659,54 +516,13 @@ export default function DemoPage() {
           }
           break
         case 'borrow':
-          // Check how many were registered to determine mapping
-          if (requiredCiphertexts.length === 3) {
-            // All three registered: SOL + borrow + USDC
-            const newSOLCid = cidPdas[0]
-            const newBorrowCid = cidPdas[1]
-            const newUSDCCid = cidPdas[2]
-            setCidPda1(newSOLCid)
-            setCidPda3(newBorrowCid)
-            setCidPda4(newUSDCCid)
-            setConfidentialSOLCid(newSOLCid)
-            setConfidentialUSDCCid(newUSDCCid)
-            addLog(' CID 1 (SOL Balance - Newly Registered): ' + newSOLCid.substring(0, 8) + '...')
-            addLog(' CID 3 (Borrow Amount - New): ' + newBorrowCid.substring(0, 8) + '...')
-            addLog(' CID 4 (USDC Balance - Newly Registered): ' + newUSDCCid.substring(0, 8) + '...')
-          } else if (requiredCiphertexts.length === 2) {
-            // Check which two were registered based on stored needsSOLRegistration
-            if (needsSOLRegistration) {
-              // SOL + borrow registered
-              const newSOLCid = cidPdas[0]
-              const newBorrowCid = cidPdas[1]
-              setCidPda1(newSOLCid)
-              setCidPda3(newBorrowCid)
-              setCidPda4(confidentialUSDCCid)
-              setConfidentialSOLCid(newSOLCid)
-              addLog(' CID 1 (SOL Balance - Newly Registered): ' + newSOLCid.substring(0, 8) + '...')
-              addLog(' CID 3 (Borrow Amount - New): ' + newBorrowCid.substring(0, 8) + '...')
-              addLog(' CID 4 (USDC Balance - Reused): ' + confidentialUSDCCid.substring(0, 8) + '...')
-            } else {
-              // borrow + USDC registered
-              const newBorrowCid = cidPdas[0]
-              const newUSDCCid = cidPdas[1]
-              setCidPda1(confidentialSOLCid)
-              setCidPda3(newBorrowCid)
-              setCidPda4(newUSDCCid)
-              setConfidentialUSDCCid(newUSDCCid)
-              addLog(' CID 1 (SOL Balance - Reused): ' + confidentialSOLCid.substring(0, 8) + '...')
-              addLog(' CID 3 (Borrow Amount - New): ' + newBorrowCid.substring(0, 8) + '...')
-              addLog(' CID 4 (USDC Balance - Newly Registered): ' + newUSDCCid.substring(0, 8) + '...')
-            }
-          } else {
-            // Only borrow amount registered, reuse existing balances
-            setCidPda1(confidentialSOLCid)
-            setCidPda3(cidPdas[0])
-            setCidPda4(confidentialUSDCCid)
-            addLog(' CID 1 (SOL Balance - Reused): ' + confidentialSOLCid.substring(0, 8) + '...')
-            addLog(' CID 3 (Borrow Amount - New): ' + cidPdas[0].substring(0, 8) + '...')
-            addLog(' CID 4 (USDC Balance - Reused): ' + confidentialUSDCCid.substring(0, 8) + '...')
-          }
+          // Only borrow amount is registered, reuse existing balances
+          setCidPda1(confidentialSOLCid)
+          setCidPda3(cidPdas[0])
+          setCidPda4(confidentialUSDCCid)
+          addLog(' CID 1 (SOL Balance - Reused): ' + confidentialSOLCid.substring(0, 8) + '...')
+          addLog(' CID 3 (Borrow Amount - New): ' + cidPdas[0].substring(0, 8) + '...')
+          addLog(' CID 4 (USDC Balance - Reused): ' + confidentialUSDCCid.substring(0, 8) + '...')
           break
       }
 
@@ -898,34 +714,33 @@ export default function DemoPage() {
               addLog(` Result CID: ${resultCid}`)
               addLog(` Executor: ${ourJob.executor || 'Unknown'}`)
               
-              // Update confidential state CID to use executor result (unregistered)
-              // This will be properly registered in the next Register CIDs step
-              if (operation === 'deposit') {
-                setConfidentialSOLCid(resultCid)
-                addLog(` Updated Confidential SOL CID: ${resultCid}`)
-                addLog(` Use "Encrypt" then "Register CIDs" before next operation`)
-              } else if (operation === 'withdraw') {
-                // For withdraw, the result is a boolean check, USDC balance doesn't change
-                // Keep using the existing USDC CID
-              } else if (operation === 'borrow') {
-                setConfidentialUSDCCid(resultCid)
-                addLog(` Updated Confidential USDC CID: ${resultCid}`)
-                addLog(` Use "Encrypt" then "Register CIDs" before next operation`)
-              }
+              // Executor updated the state CID in-place (no new CID created)
+              // Result CID is the same as the original state CID
+              addLog(` State CID updated in-place: ${resultCid.slice(0, 8)}...`)
               
-              // Show actual computation result
-              if (ourJob.computation_result) {
-                addLog(` Computed result: ${ourJob.computation_result}`)
-              }
-              
-              // Try to get result immediately via CID API
+              // Fetch updated ciphertext content
               if (resultCid && resultCid !== 'ResultCID_' + Date.now().toString(36)) {
                 setTimeout(async () => {
                   try {
-                    addLog(` Auto-fetching result via CID: ${resultCid}`)
+                    addLog(` Fetching updated state ciphertext...`)
                     const cidResponse = await fetch(`/api/ciphertext/${resultCid}`)
                     if (cidResponse.ok) {
                       const cidData = await cidResponse.json()
+                      
+                      // Update ciphertext with executor result
+                      if (cidData.ciphertext) {
+                        if (operation === 'deposit') {
+                          // Update SOL balance ciphertext (CID stays the same)
+                          setCiphertext1(cidData.ciphertext)
+                          addLog(` ✓ SOL balance ciphertext updated`)
+                        } else if (operation === 'borrow') {
+                          // Update USDC balance ciphertext (CID stays the same)
+                          setCiphertext4(cidData.ciphertext)
+                          addLog(` ✓ USDC balance ciphertext updated`)
+                        }
+                      }
+                      
+                      // Show decrypted result
                       if (cidData.computation_result !== null && cidData.computation_result !== undefined) {
                         setDecryptedResult(String(cidData.computation_result))
                         addLog(` Auto-decrypted result: ${cidData.computation_result}`)
@@ -935,9 +750,14 @@ export default function DemoPage() {
                       }
                     }
                   } catch (error) {
-                    addLog(` Auto-fetch failed: ${error}`)
+                    addLog(` Failed to fetch updated state: ${error}`)
                   }
                 }, 1000)
+              }
+              
+              // Show actual computation result immediately
+              if (ourJob.computation_result) {
+                addLog(` Computed result: ${ourJob.computation_result}`)
               }
               return
             } else if (ourJob.status === 'failed') {
@@ -1074,13 +894,14 @@ export default function DemoPage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}>
                 <span style={{ color: '#9ca3af', fontWeight: '500' }}>wSOL:</span>
                 <span style={{ 
-                  color: solBalanceState === 'encrypted' ? '#f59e0b' : '#ffffff', 
-                  fontWeight: '500',
-                  fontFamily: 'monospace'
+                  color: solBalanceState === 'encrypted' ? '#3b82f6' : '#ffffff', 
+                  fontWeight: '600',
+                  fontFamily: 'monospace',
+                  fontSize: '13px'
                 }}>
                   {solBalanceState === 'encrypted' && ciphertext1 ? 
-                    `${'0'.repeat(8)}${ciphertext1.encrypted_data.slice(0, 6).map((n: number) => Math.abs(n).toString(36).substring(0, 2)).join('')}...` : 
-                    `${confidentialSOL}`}
+                    `${ciphertext1.encrypted_data.slice(16, 24).map((n: number) => Math.abs(n % 1296).toString(36).padStart(2, '0')).join('').substring(0, 12).toUpperCase()}...` : 
+                    solBalanceState === 'initial' ? '-' : `${confidentialSOL}`}
                 </span>
                 {confidentialSOLCid && (
                   <span style={{ color: '#6b7280', fontSize: '10px', fontFamily: 'monospace' }}>
@@ -1117,12 +938,13 @@ export default function DemoPage() {
                 <span style={{ color: '#9ca3af', fontWeight: '500' }}>USDC:</span>
                 <span style={{ 
                   color: usdcBalanceState === 'encrypted' ? '#f59e0b' : '#ffffff', 
-                  fontWeight: '500',
-                  fontFamily: 'monospace'
+                  fontWeight: '600',
+                  fontFamily: 'monospace',
+                  fontSize: '13px'
                 }}>
                   {usdcBalanceState === 'encrypted' && ciphertext4 ? 
-                    `${'0'.repeat(8)}${ciphertext4.encrypted_data.slice(0, 6).map((n: number) => Math.abs(n).toString(36).substring(0, 2)).join('')}...` : 
-                    `${confidentialUSDC}`}
+                    `${ciphertext4.encrypted_data.slice(64, 72).map((n: number) => Math.abs(n % 1296).toString(36).padStart(2, '0')).join('').substring(0, 12).toUpperCase()}...` : 
+                    usdcBalanceState === 'initial' ? '-' : `${confidentialUSDC}`}
                 </span>
                 {confidentialUSDCCid && (
                   <span style={{ color: '#6b7280', fontSize: '10px', fontFamily: 'monospace' }}>
@@ -1170,6 +992,184 @@ export default function DemoPage() {
       </div>
 
 
+      {/* Confidential Variables Display */}
+      <fieldset style={{ margin: '20px 0', padding: '20px', border: '2px solid #0f0', borderRadius: '8px', background: '#0a0a0a' }}>
+        <legend style={{ fontSize: '18px', fontWeight: 'bold', color: '#0f0' }}>Confidential Variables</legend>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '10px' }}>
+          {/* Variable 1: SOL Balance */}
+          <div style={{ 
+            padding: '12px', 
+            background: solBalanceState === 'encrypted' ? '#1a2e3b' : '#1a1a2e', 
+            border: `2px solid ${solBalanceState === 'encrypted' ? '#3b82f6' : '#334155'}`, 
+            borderRadius: '8px',
+            transition: 'all 0.3s ease',
+            boxShadow: solBalanceState === 'encrypted' ? '0 0 20px rgba(59, 130, 246, 0.3)' : 'none'
+          }}>
+            <div style={{ fontSize: '12px', color: '#3b82f6', fontWeight: 'bold', marginBottom: '4px' }}>(1) SOL Balance</div>
+            <div style={{ fontSize: '20px', color: '#fff', fontFamily: 'monospace', minHeight: '30px' }}>
+              {solBalanceState === 'encrypted' && ciphertext1 ? (
+                <div style={{ 
+                  background: 'linear-gradient(90deg, #3b82f6, #1e40af, #3b82f6)',
+                  backgroundSize: '200% 100%',
+                  animation: 'gradient 2s ease infinite',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  fontWeight: 'bold'
+                }}>
+                  {ciphertext1.encrypted_data.slice(16, 24).map((n: number) => Math.abs(n % 1296).toString(36).padStart(2, '0')).join('').substring(0, 12).toUpperCase()}...
+                </div>
+              ) : solBalanceState === 'initial' ? (
+                <span style={{ color: '#666' }}>-</span>
+              ) : (
+                <span style={{ color: '#10b981' }}>{confidentialSOL}</span>
+              )}
+            </div>
+            <div style={{ fontSize: '10px', color: '#666', marginTop: '4px' }}>
+              {solBalanceState === 'encrypted' ? '🔒 ENCRYPTED' : 
+               confidentialSOLCid ? `CID: ${confidentialSOLCid.substring(0, 8)}...` : 'Not encrypted'}
+            </div>
+          </div>
+
+          {/* Variable 2: Deposit Amount */}
+          <div style={{ 
+            padding: '12px', 
+            background: ciphertext2 ? '#1a2e20' : '#1a1a2e', 
+            border: `2px solid ${ciphertext2 ? '#10b981' : '#334155'}`, 
+            borderRadius: '8px',
+            opacity: operation === 'deposit' ? 1 : 0.4,
+            transition: 'all 0.3s ease',
+            boxShadow: ciphertext2 ? '0 0 20px rgba(16, 185, 129, 0.3)' : 'none'
+          }}>
+            <div style={{ fontSize: '12px', color: '#10b981', fontWeight: 'bold', marginBottom: '4px' }}>(2) Deposit Amount</div>
+            <div style={{ fontSize: '20px', color: '#fff', fontFamily: 'monospace', minHeight: '30px' }}>
+              {ciphertext2 ? (
+                <div style={{ 
+                  background: 'linear-gradient(90deg, #10b981, #059669, #10b981)',
+                  backgroundSize: '200% 100%',
+                  animation: 'gradient 2s ease infinite',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  fontWeight: 'bold'
+                }}>
+                  {ciphertext2.encrypted_data.slice(32, 40).map((n: number) => Math.abs(n % 1296).toString(36).padStart(2, '0')).join('').substring(0, 12).toUpperCase()}...
+                </div>
+              ) : (
+                <span style={{ color: '#10b981' }}>{depositAmount}</span>
+              )}
+            </div>
+            <div style={{ fontSize: '10px', color: '#666', marginTop: '4px' }}>
+              {ciphertext2 ? '🔒 ENCRYPTED' : 'Plaintext'}
+            </div>
+          </div>
+
+          {/* Variable 3: Borrow Amount */}
+          <div style={{ 
+            padding: '12px', 
+            background: ciphertext3 ? '#2e1a3b' : '#1a1a2e', 
+            border: `2px solid ${ciphertext3 ? '#8b5cf6' : '#334155'}`, 
+            borderRadius: '8px',
+            opacity: operation === 'borrow' ? 1 : 0.4,
+            transition: 'all 0.3s ease',
+            boxShadow: ciphertext3 ? '0 0 20px rgba(139, 92, 246, 0.3)' : 'none'
+          }}>
+            <div style={{ fontSize: '12px', color: '#8b5cf6', fontWeight: 'bold', marginBottom: '4px' }}>(3) Borrow Amount</div>
+            <div style={{ fontSize: '20px', color: '#fff', fontFamily: 'monospace', minHeight: '30px' }}>
+              {ciphertext3 ? (
+                <div style={{ 
+                  background: 'linear-gradient(90deg, #8b5cf6, #6d28d9, #8b5cf6)',
+                  backgroundSize: '200% 100%',
+                  animation: 'gradient 2s ease infinite',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  fontWeight: 'bold'
+                }}>
+                  {ciphertext3.encrypted_data.slice(48, 56).map((n: number) => Math.abs(n % 1296).toString(36).padStart(2, '0')).join('').substring(0, 12).toUpperCase()}...
+                </div>
+              ) : (
+                <span style={{ color: '#8b5cf6' }}>{borrowAmount}</span>
+              )}
+            </div>
+            <div style={{ fontSize: '10px', color: '#666', marginTop: '4px' }}>
+              {ciphertext3 ? '🔒 ENCRYPTED' : 'Plaintext'}
+            </div>
+          </div>
+
+          {/* Variable 4: USDC Balance */}
+          <div style={{ 
+            padding: '12px', 
+            background: usdcBalanceState === 'encrypted' ? '#2e2a1a' : '#1a1a2e', 
+            border: `2px solid ${usdcBalanceState === 'encrypted' ? '#f59e0b' : '#334155'}`, 
+            borderRadius: '8px',
+            transition: 'all 0.3s ease',
+            boxShadow: usdcBalanceState === 'encrypted' ? '0 0 20px rgba(245, 158, 11, 0.3)' : 'none'
+          }}>
+            <div style={{ fontSize: '12px', color: '#f59e0b', fontWeight: 'bold', marginBottom: '4px' }}>(4) USDC Balance</div>
+            <div style={{ fontSize: '20px', color: '#fff', fontFamily: 'monospace', minHeight: '30px' }}>
+              {usdcBalanceState === 'encrypted' && ciphertext4 ? (
+                <div style={{ 
+                  background: 'linear-gradient(90deg, #f59e0b, #d97706, #f59e0b)',
+                  backgroundSize: '200% 100%',
+                  animation: 'gradient 2s ease infinite',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  fontWeight: 'bold'
+                }}>
+                  {ciphertext4.encrypted_data.slice(64, 72).map((n: number) => Math.abs(n % 1296).toString(36).padStart(2, '0')).join('').substring(0, 12).toUpperCase()}...
+                </div>
+              ) : usdcBalanceState === 'initial' ? (
+                <span style={{ color: '#666' }}>-</span>
+              ) : (
+                <span style={{ color: '#10b981' }}>{confidentialUSDC}</span>
+              )}
+            </div>
+            <div style={{ fontSize: '10px', color: '#666', marginTop: '4px' }}>
+              {usdcBalanceState === 'encrypted' ? '🔒 ENCRYPTED' : 
+               confidentialUSDCCid ? `CID: ${confidentialUSDCCid.substring(0, 8)}...` : 'Not encrypted'}
+            </div>
+          </div>
+
+          {/* Variable 5: Withdraw Amount */}
+          <div style={{ 
+            padding: '12px', 
+            background: ciphertext5 ? '#2e1a1a' : '#1a1a2e', 
+            border: `2px solid ${ciphertext5 ? '#ef4444' : '#334155'}`, 
+            borderRadius: '8px',
+            opacity: operation === 'withdraw' ? 1 : 0.4,
+            transition: 'all 0.3s ease',
+            boxShadow: ciphertext5 ? '0 0 20px rgba(239, 68, 68, 0.3)' : 'none'
+          }}>
+            <div style={{ fontSize: '12px', color: '#ef4444', fontWeight: 'bold', marginBottom: '4px' }}>(5) Withdraw Amount</div>
+            <div style={{ fontSize: '20px', color: '#fff', fontFamily: 'monospace', minHeight: '30px' }}>
+              {ciphertext5 ? (
+                <div style={{ 
+                  background: 'linear-gradient(90deg, #ef4444, #dc2626, #ef4444)',
+                  backgroundSize: '200% 100%',
+                  animation: 'gradient 2s ease infinite',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  fontWeight: 'bold'
+                }}>
+                  {ciphertext5.encrypted_data.slice(80, 88).map((n: number) => Math.abs(n % 1296).toString(36).padStart(2, '0')).join('').substring(0, 12).toUpperCase()}...
+                </div>
+              ) : (
+                <span style={{ color: '#ef4444' }}>{withdrawAmount}</span>
+              )}
+            </div>
+            <div style={{ fontSize: '10px', color: '#666', marginTop: '4px' }}>
+              {ciphertext5 ? '🔒 ENCRYPTED' : 'Plaintext'}
+            </div>
+          </div>
+        </div>
+        
+        <style>{`
+          @keyframes gradient {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+          }
+        `}</style>
+      </fieldset>
+
       {/* Transaction Inputs */}
       <fieldset style={{ margin: '20px 0', padding: '15px', border: ciphertext1 ? '2px solid #0f0' : '2px solid #555', borderRadius: '8px', opacity: !moduleReady ? 0.6 : 1 }}>
         <legend style={{ fontSize: '18px', fontWeight: 'bold' }}>
@@ -1191,6 +1191,65 @@ export default function DemoPage() {
             <option value="borrow">Borrow</option>
           </select>
         </div>
+
+        {/* Execution Plan Visualization */}
+        {operation && (
+          <div style={{ marginBottom: '20px', padding: '15px', background: '#1a1a2e', borderRadius: '8px', border: '2px solid #0f0' }}>
+            <div style={{ fontSize: '16px', fontWeight: 'bold', color: '#0f0', marginBottom: '10px' }}>
+              FHE Execution Plan
+            </div>
+            
+            {operation === 'deposit' && (
+              <div style={{ fontFamily: 'monospace', fontSize: '14px' }}>
+                <div style={{ padding: '8px', background: '#0a0a0a', borderRadius: '4px', marginBottom: '8px', border: '1px solid #3b82f6' }}>
+                  <span style={{ color: '#3b82f6' }}>(1)</span> = ADD(<span style={{ color: '#3b82f6' }}>(1)</span>, <span style={{ color: '#10b981' }}>(2)</span>)
+                </div>
+                <div style={{ fontSize: '12px', color: '#888', marginTop: '8px' }}>
+                  → SOL Balance = SOL Balance + Deposit Amount
+                </div>
+              </div>
+            )}
+            
+            {operation === 'borrow' && (
+              <div style={{ fontFamily: 'monospace', fontSize: '14px' }}>
+                <div style={{ padding: '8px', background: '#0a0a0a', borderRadius: '4px', marginBottom: '6px', border: '1px solid #666' }}>
+                  <span style={{ color: '#888' }}>(a)</span> = MUL_CONST(<span style={{ color: '#8b5cf6' }}>(3)</span>, 2)
+                </div>
+                <div style={{ padding: '8px', background: '#0a0a0a', borderRadius: '4px', marginBottom: '6px', border: '1px solid #666' }}>
+                  <span style={{ color: '#888' }}>(b)</span> = GE(<span style={{ color: '#3b82f6' }}>(1)</span>, <span style={{ color: '#888' }}>(a)</span>)
+                </div>
+                <div style={{ padding: '8px', background: '#0a0a0a', borderRadius: '4px', marginBottom: '6px', border: '1px solid #666' }}>
+                  <span style={{ color: '#888' }}>(d)</span> = ADD(<span style={{ color: '#f59e0b' }}>(4)</span>, <span style={{ color: '#8b5cf6' }}>(3)</span>)
+                </div>
+                <div style={{ padding: '8px', background: '#0a0a0a', borderRadius: '4px', marginBottom: '8px', border: '1px solid #f59e0b' }}>
+                  <span style={{ color: '#f59e0b' }}>(4)</span> = SELECT(<span style={{ color: '#888' }}>(b)</span>, <span style={{ color: '#888' }}>(d)</span>, <span style={{ color: '#f59e0b' }}>(4)</span>)
+                </div>
+                <div style={{ fontSize: '12px', color: '#888', marginTop: '8px' }}>
+                  → If SOL ≥ Borrow×2: USDC = USDC + Borrow<br/>
+                  → Else: USDC = USDC (no change)
+                </div>
+              </div>
+            )}
+            
+            {operation === 'withdraw' && (
+              <div style={{ fontFamily: 'monospace', fontSize: '14px' }}>
+                <div style={{ padding: '8px', background: '#0a0a0a', borderRadius: '4px', marginBottom: '6px', border: '1px solid #666' }}>
+                  <span style={{ color: '#888' }}>(a)</span> = GE(<span style={{ color: '#f59e0b' }}>(4)</span>, <span style={{ color: '#ef4444' }}>(5)</span>)
+                </div>
+                <div style={{ padding: '8px', background: '#0a0a0a', borderRadius: '4px', marginBottom: '6px', border: '1px solid #666' }}>
+                  <span style={{ color: '#888' }}>(b)</span> = SUB(<span style={{ color: '#f59e0b' }}>(4)</span>, <span style={{ color: '#ef4444' }}>(5)</span>)
+                </div>
+                <div style={{ padding: '8px', background: '#0a0a0a', borderRadius: '4px', marginBottom: '8px', border: '1px solid #f59e0b' }}>
+                  <span style={{ color: '#f59e0b' }}>(4)</span> = SELECT(<span style={{ color: '#888' }}>(a)</span>, <span style={{ color: '#888' }}>(b)</span>, <span style={{ color: '#f59e0b' }}>(4)</span>)
+                </div>
+                <div style={{ fontSize: '12px', color: '#888', marginTop: '8px' }}>
+                  → If USDC ≥ Withdraw: USDC = USDC - Withdraw<br/>
+                  → Else: USDC = USDC (no change)
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {operation === 'deposit' && (
           <div style={{ marginBottom: '15px' }}>
@@ -1248,37 +1307,73 @@ export default function DemoPage() {
           Encrypt for {operation.charAt(0).toUpperCase() + operation.slice(1)}
         </button>
         
-        {ciphertext1 && (
-          <div style={{ marginTop: '15px', padding: '10px', background: '#1a3a1a', borderRadius: '4px', border: '1px solid #0f0' }}>
-            <div style={{ fontSize: '14px', marginBottom: '5px', color: '#0f0' }}>
-              <strong> Encrypted for {operation} operation:</strong>
+        {((operation === 'deposit' && ciphertext2) || 
+          (operation === 'withdraw' && ciphertext5) || 
+          (operation === 'borrow' && ciphertext3)) && (
+          <div style={{ marginTop: '15px', padding: '15px', background: '#1a3a1a', borderRadius: '4px', border: '1px solid #0f0' }}>
+            <div style={{ fontSize: '14px', marginBottom: '10px', color: '#0f0' }}>
+              <strong>✓ Transaction input encrypted:</strong>
             </div>
             
-            <div style={{ fontSize: '12px', color: '#888', marginBottom: '10px' }}>
-              • Confidential State: SOL Balance + USDC Balance<br/>
-              • Transaction Input: {
-                operation === 'deposit' ? 'Deposit Amount' :
-                operation === 'withdraw' ? 'Withdraw Amount' :
-                operation === 'borrow' ? 'Borrow Amount' : 'Unknown'
-              }
+            <div style={{ fontSize: '12px', color: '#888', marginBottom: '15px' }}>
+              • Encrypted: {
+                operation === 'deposit' ? `Deposit Amount (${depositAmount} SOL)` :
+                operation === 'withdraw' ? `Withdraw Amount (${withdrawAmount} USDC)` :
+                operation === 'borrow' ? `Borrow Amount (${borrowAmount} USDC)` : 'Unknown'
+              }<br/>
+              • Confidential State (SOL, USDC) will be reused from existing CIDs
             </div>
             
-            <div style={{ fontSize: '11px', color: '#666', marginBottom: '5px' }}>
-              Sample encrypted data:
-            </div>
-            <div style={{ fontSize: '11px', color: '#888', fontFamily: 'monospace', wordBreak: 'break-all', lineHeight: '1.6' }}>
-              [{ciphertext1.encrypted_data.slice(16, 32).join(', ')}, ...]
+            <div style={{ 
+              padding: '12px', 
+              background: '#0a0a0a', 
+              borderRadius: '4px', 
+              border: '1px solid #0f0',
+              marginBottom: '10px'
+            }}>
+              <div style={{ fontSize: '10px', color: '#666', marginBottom: '6px' }}>
+                Ciphertext Preview (Transaction Input):
+              </div>
+              <div style={{ 
+                fontSize: '16px', 
+                color: '#0f0', 
+                fontFamily: 'monospace', 
+                wordBreak: 'break-all', 
+                lineHeight: '1.8',
+                fontWeight: 'bold'
+              }}>
+                {(operation === 'deposit' ? ciphertext2 :
+                  operation === 'withdraw' ? ciphertext5 :
+                  operation === 'borrow' ? ciphertext3 : null
+                )?.encrypted_data.slice(16, 32).map((n: number) => 
+                  Math.abs(n % 1679616).toString(36).padStart(4, '0').toUpperCase()
+                ).join(' ')}...
+              </div>
+              <div style={{ fontSize: '10px', color: '#666', marginTop: '6px' }}>
+                {(operation === 'deposit' ? ciphertext2 :
+                  operation === 'withdraw' ? ciphertext5 :
+                  operation === 'borrow' ? ciphertext3 : null
+                )?.encrypted_data.length} integers encrypted with FHE16
+              </div>
             </div>
 
-            <div style={{ marginTop: '15px', fontSize: '13px', color: '#0f0', borderTop: '1px solid #0f0', paddingTop: '10px' }}>
-              Encrypted locally in browser • Scheme: {ciphertext1.scheme}
+            <div style={{ fontSize: '12px', color: '#0f0' }}>
+              🔒 Encrypted locally in browser • Scheme: {
+                (operation === 'deposit' ? ciphertext2 :
+                  operation === 'withdraw' ? ciphertext5 :
+                  operation === 'borrow' ? ciphertext3 : null
+                )?.scheme
+              }
             </div>
           </div>
         )}
       </fieldset>
 
       {/* Step 2 */}
-      <fieldset style={{ margin: '20px 0', padding: '15px', border: regTxSig ? '2px solid #0f0' : '2px solid #555', borderRadius: '8px', opacity: (!publicKey || !ciphertext1) ? 0.6 : 1 }}>
+      <fieldset style={{ margin: '20px 0', padding: '15px', border: regTxSig ? '2px solid #0f0' : '2px solid #555', borderRadius: '8px', opacity: (!publicKey || 
+        ((operation === 'deposit' && !ciphertext2) || 
+         (operation === 'withdraw' && !ciphertext5) || 
+         (operation === 'borrow' && !ciphertext3))) ? 0.6 : 1 }}>
         <legend style={{ fontSize: '18px', fontWeight: 'bold' }}>
           Step 2: Register CIDs On-Chain
         </legend>
@@ -1287,13 +1382,20 @@ export default function DemoPage() {
         </p>
         <button
           onClick={handleRegisterCIDs}
-          disabled={!publicKey || !ciphertext1}
+          disabled={!publicKey || 
+            ((operation === 'deposit' && !ciphertext2) || 
+             (operation === 'withdraw' && !ciphertext5) || 
+             (operation === 'borrow' && !ciphertext3))}
           style={{
             padding: '12px 30px',
-            background: (publicKey && ciphertext1) ? '#0f0' : '#555',
+            background: (publicKey && ((operation === 'deposit' && ciphertext2) || 
+                                       (operation === 'withdraw' && ciphertext5) || 
+                                       (operation === 'borrow' && ciphertext3))) ? '#0f0' : '#555',
             color: '#000',
             border: 'none',
-            cursor: (publicKey && ciphertext1) ? 'pointer' : 'not-allowed',
+            cursor: (publicKey && ((operation === 'deposit' && ciphertext2) || 
+                                   (operation === 'withdraw' && ciphertext5) || 
+                                   (operation === 'borrow' && ciphertext3))) ? 'pointer' : 'not-allowed',
             fontSize: '16px',
             fontWeight: 'bold',
             borderRadius: '4px'
@@ -1364,7 +1466,10 @@ export default function DemoPage() {
       </fieldset>
 
       {/* Step 3 */}
-      <fieldset style={{ margin: '20px 0', padding: '15px', border: jobTxSig ? '2px solid #0f0' : '2px solid #555', borderRadius: '8px', opacity: (!publicKey || !cidPda1) ? 0.6 : 1 }}>
+      <fieldset style={{ margin: '20px 0', padding: '15px', border: jobTxSig ? '2px solid #0f0' : '2px solid #555', borderRadius: '8px', opacity: (!publicKey || 
+        ((operation === 'deposit' && !cidPda2) || 
+         (operation === 'withdraw' && !cidPda5) || 
+         (operation === 'borrow' && !cidPda3))) ? 0.6 : 1 }}>
         <legend style={{ fontSize: '18px', fontWeight: 'bold' }}>
           Step 3: Submit FHE Computation Job
         </legend>
@@ -1385,66 +1490,35 @@ export default function DemoPage() {
           </select>
         </div>
         <div style={{ fontSize: '13px', color: '#888', marginBottom: '15px', padding: '10px', background: '#1a1a1a', borderRadius: '4px' }}>
-          <strong>Selected Operation:</strong> {
-            operation === 'deposit' ? 'ADD' :
-            operation === 'withdraw' ? 'GE+SUB+SELECT' :
-            operation === 'borrow' ? 'MUL_CONST+GE+SELECT+ADD' :
-            operation === 'liquidation' ? 'MUL+MUL_CONST+GT' : 'UNKNOWN'
-          }<br/>
           <strong>Input CIDs:</strong> {
-            operation === 'deposit' ? '2 (SOL_balance + deposit_amount)' :
-            operation === 'withdraw' ? '2 (USDC_balance + withdraw_amount)' :
-            operation === 'borrow' ? '3 (SOL_balance + borrow_amount + USDC_balance)' :
-            operation === 'liquidation' ? '3 (collateral + debt + price)' : '2'
-          }<br/>
-          <strong>FHE Computation:</strong> {
-            operation === 'deposit' ? 'SOL_balance = SOL_balance + deposit_amount' :
-            operation === 'withdraw' ? 'USDC_balance = (USDC &gt;= amount) ? USDC - amount : USDC' :
-            operation === 'borrow' ? 'USDC_balance = (SOL &gt;= borrow*2) ? USDC + borrow : USDC' :
-            operation === 'liquidation' ? 'Health factor check + liquidation logic' :
-            'Unknown operation'
-          }<br/>
-          <strong>IR Digest:</strong> <span style={{ fontFamily: 'monospace', fontSize: '11px', color: '#666' }}>{
-            operation === 'deposit' ? '0xadd0000000000000000000000000000000000000000000000000000000000000' :
-            operation === 'withdraw' ? '0xwithdrw000000000000000000000000000000000000000000000000000000000' :
-            operation === 'borrow' ? '0xmul0000000000000000000000000000000000000000000000000000000000000' :
-            operation === 'liquidation' ? '0xhealthcheck00000000000000000000000000000000000000000000000000000' : 'unknown'
+            operation === 'deposit' ? '2 CIDs' :
+            operation === 'withdraw' ? '2 CIDs' :
+            operation === 'borrow' ? '3 CIDs' :
+            operation === 'liquidation' ? '3 CIDs' : '2 CIDs'
+          } • <strong>IR Digest:</strong> <span style={{ fontFamily: 'monospace', fontSize: '11px', color: '#666' }}>{
+            operation === 'deposit' ? '0xadd0...' :
+            operation === 'withdraw' ? '0xwithdrw...' :
+            operation === 'borrow' ? '0xmul0...' :
+            operation === 'liquidation' ? '0xhealthcheck...' : 'unknown'
           }</span><br/>
-          <strong>Execution Plan:</strong><br/>
-          <div style={{ marginLeft: '20px', fontSize: '11px', color: '#666', fontFamily: 'monospace', marginTop: '5px' }}>
-            {operation === 'deposit' && (
-              <>• result = ADD(SOL_balance, deposit_amount)</>
-            )}
-            {operation === 'withdraw' && (
-              <>
-                • temp_a = GE(USDC_balance, withdraw_amount)<br/>
-                • temp_b = SUB(USDC_balance, withdraw_amount)<br/>
-                • result = SELECT(temp_a, temp_b, USDC_balance)
-              </>
-            )}
-            {operation === 'borrow' && (
-              <>
-                • temp_a = MUL_CONST(borrow_amount, 2)<br/>
-                • temp_b = GE(SOL_balance, temp_a)<br/>
-                • temp_d = ADD(USDC_balance, borrow_amount)<br/>
-                • result = SELECT(temp_b, temp_d, USDC_balance)
-              </>
-            )}
-            {operation === 'liquidation' && (
-              <>• Complex health factor computation</>
-            )}
-          </div>
-          <strong style={{ marginTop: '8px', display: 'block' }}>Note:</strong> Executor processes encrypted data without seeing plaintext values
+          <strong>Note:</strong> Executor processes encrypted data without seeing plaintext values (see execution plan above)
         </div>
         <button
           onClick={handleSubmitJob}
-          disabled={!publicKey || !cidPda1}
+          disabled={!publicKey || 
+            ((operation === 'deposit' && !cidPda2) || 
+             (operation === 'withdraw' && !cidPda5) || 
+             (operation === 'borrow' && !cidPda3))}
           style={{
             padding: '12px 30px',
-            background: (publicKey && cidPda1) ? '#0f0' : '#555',
+            background: (publicKey && ((operation === 'deposit' && cidPda2) || 
+                                       (operation === 'withdraw' && cidPda5) || 
+                                       (operation === 'borrow' && cidPda3))) ? '#0f0' : '#555',
             color: '#000',
             border: 'none',
-            cursor: (publicKey && cidPda1) ? 'pointer' : 'not-allowed',
+            cursor: (publicKey && ((operation === 'deposit' && cidPda2) || 
+                                   (operation === 'withdraw' && cidPda5) || 
+                                   (operation === 'borrow' && cidPda3))) ? 'pointer' : 'not-allowed',
             fontSize: '16px',
             fontWeight: 'bold',
             borderRadius: '4px'

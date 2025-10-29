@@ -125,6 +125,26 @@ class CiphertextStore {
   }
 
   /**
+   * Update ciphertext content (for executor results updating state)
+   */
+  update_ciphertext_content(
+    cid_pda: string,
+    new_ciphertext: unknown,
+  ): boolean {
+    const stored = this.store.get(cid_pda)
+    if (!stored) return false
+
+    // Update ciphertext content (keep original provenance)
+    stored.ciphertext = new_ciphertext
+    
+    log.info('Updated CID ciphertext content', { 
+      cid: cid_pda.slice(0, 8) + '...',
+      original_provenance: stored.metadata.provenance
+    })
+    return true
+  }
+
+  /**
    * Update verification status (for on-chain confirmation)
    */
   update_verification(
