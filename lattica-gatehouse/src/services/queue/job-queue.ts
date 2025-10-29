@@ -80,7 +80,9 @@ class JobQueue {
     log.info('Enqueued job', { 
       job: event.job.slice(0, 8) + '...', 
       batch: event.batch.slice(0, 8) + '...', 
-      slot: event.slot 
+      slot: event.slot,
+      ir_digest: event.ir_digest?.slice(0, 10) + '...',
+      commitment: event.commitment?.slice(0, 10) + '...'
     })
     return job
   }

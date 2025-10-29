@@ -227,6 +227,8 @@ export class LogParser {
         offset += 32
       }
 
+      // Fix: ir_digest and commitment were swapped in event parsing
+      // Event should match instruction order: commitment, then ir_digest
       const commitment = this.bufferToHex(data.slice(offset, offset + 32))
       offset += 32
 

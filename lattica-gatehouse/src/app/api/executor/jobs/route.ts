@@ -61,6 +61,13 @@ export async function GET(request: NextRequest) {
           }
         })
 
+        log.info('Sending job to executor', {
+          job_pda: job.job_pda.slice(0, 8) + '...',
+          ir_digest: job.ir_digest?.slice(0, 10) + '...',
+          commitment: job.commitment?.slice(0, 10) + '...',
+          ciphertext_count: ciphertexts.length
+        })
+        
         return {
           job_pda: job.job_pda,
           batch: job.batch,

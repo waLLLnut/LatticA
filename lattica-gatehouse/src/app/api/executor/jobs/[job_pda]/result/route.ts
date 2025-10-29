@@ -10,6 +10,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { jobQueue } from '@/services/queue/job-queue'
 import { ciphertextStore } from '@/services/storage/ciphertext-store'
 import { createLogger } from '@/lib/logger'
+import bs58 from 'bs58'
+import { createHash } from 'crypto'
 
 const log = createLogger('API:SubmitResult')
 
@@ -112,8 +114,13 @@ export async function POST(
         )
       }
       
-      // Store result ciphertext in ciphertextStore
-      resultHandle = `ResultCID_${job_pda.slice(0, 8)}_${Date.now()}`
+      const hash = createHash('sha256')
+        .update(job_pda)
+        .update('FHE_RESULT')
+        .update(Date.now().toString())
+        .digest()
+      
+      resultHandle = bs58.encode(hash)
       
       try {
         // Store result ciphertext with proper metadata

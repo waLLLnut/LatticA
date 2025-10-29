@@ -10,33 +10,86 @@ const POLL_INTERVAL = 5000; // 5 seconds
 
 let isProcessing = false;
 
+// Logger utility with colors
+class Logger {
+  constructor() {
+    this.colors = {
+      reset: '\x1b[0m',
+      bright: '\x1b[1m',
+      dim: '\x1b[2m',
+      
+      // Level colors
+      debug: '\x1b[36m',    // Cyan
+      info: '\x1b[32m',     // Green
+      warn: '\x1b[33m',     // Yellow
+      error: '\x1b[31m',    // Red
+      
+      // Component color
+      component: '\x1b[35m', // Magenta
+      
+      // Context color
+      context: '\x1b[90m',   // Gray
+    };
+  }
+
+  format(level, component, message, context = {}) {
+    const levelTag = level.toUpperCase().padEnd(5);
+    const componentTag = component.padEnd(20);
+    const levelColor = this.colors[level] || this.colors.reset;
+    
+    let contextStr = '';
+    if (Object.keys(context).length > 0) {
+      const pairs = Object.entries(context)
+        .map(([key, val]) => `${key}=${val}`)
+        .join(', ');
+      contextStr = ` ${this.colors.context}(${pairs})${this.colors.reset}`;
+    }
+    
+    return `${levelColor}${this.colors.bright}${levelTag}${this.colors.reset} | ${this.colors.component}${componentTag}${this.colors.reset} | ${levelColor}${message}${this.colors.reset}${contextStr}`;
+  }
+
+  debug(component, message, context) {
+    console.debug(this.format('debug', component, message, context));
+  }
+
+  info(component, message, context) {
+    console.log(this.format('info', component, message, context));
+  }
+
+  warn(component, message, context) {
+    console.warn(this.format('warn', component, message, context));
+  }
+
+  error(component, message, context) {
+    console.error(this.format('error', component, message, context));
+  }
+}
+
+const logger = new Logger();
+
 // Initialize FHE16
 async function initFHE16() {
   try {
-    console.log('[FHE_EXECUTOR] Initializing FHE16...');
+    logger.info('FHE:Init', 'Initializing FHE16...');
     
-    // Initialize parameters
     const skInitPtr = FHE16.FHE16_GenEval();
     if (!skInitPtr) {
       throw new Error('GenEval returned null');
     }
 
-    // Load bootparam
     const bootPath = path.join(__dirname, 'FHE16', 'store', 'boot', 'bootparam.bin');
     try {
       FHE16.bootparamLoadFileGlobal(bootPath);
     } catch (e) {
-      console.warn('[FHE_EXECUTOR] Could not load bootparam:', e.message);
+      logger.warn('FHE:Init', 'Could not load bootparam', { error: e.message });
     }
-    console.log('[FHE_EXECUTOR] Bootparam loaded from:', bootPath);
 
-    // Load secret key for testing/verification
     await loadSecretKey();
     
-    console.log('[FHE_EXECUTOR] FHE16 initialized successfully');
+    logger.info('FHE:Init', 'Initialization complete');
     return true;
   } catch (e) {
-    console.error('[FHE_EXECUTOR] FHE16 init error:', e.message || e);
+    logger.error('FHE:Init', 'Initialization failed', { error: e.message || e });
     return false;
   }
 }
@@ -142,49 +195,75 @@ async function loadSecretKey() {
     const secretPath = path.join(__dirname, 'FHE16', 'store', 'keys', 'secret.bin');
     if (FHE16.secretKeyLoadFileSafe) {
       secretKey = FHE16.secretKeyLoadFileSafe(secretPath);
-      console.log('[FHE_EXECUTOR] Secret key loaded for testing');
-    } else {
-      console.warn('[FHE_EXECUTOR] secretKeyLoadFileSafe not available');
     }
     return true;
   } catch (error) {
-    console.warn('[FHE_EXECUTOR] Could not load secret key:', error.message);
     return false;
   }
 }
 
-// Define DeFi FHE computation patterns based on IR digest
-const DEFI_PROGRAMS = {
-  // Deposit: Public balance -> Private state (ADD operation)
-  'DEPOSIT_PROGRAM': {
+// FHE Operation Registry
+const FHE_OPERATION_REGISTRY = {
+  // Built-in operations
+  '0xadd0000000000000000000000000000000000000000000000000000000000000': {
+    name: 'binary_add',
+    description: 'Basic addition: output = input[0] + input[1]',
+    input_slots: 2,
     operations: ['add'],
-    description: 'Deposit: Add deposit amount to current private balance',
-    scenario: 'public_to_private',
-    computation: 'new_balance = current_balance + deposit_amount'
+    execution_plan: [
+      { op: 'add', inputs: [0, 1], output: 'result' }
+    ]
   },
   
-  // Withdraw: Private state -> Public balance (SUB operation)  
-  'WITHDRAW_PROGRAM': {
-    operations: ['sub'],
-    description: 'Withdraw: Subtract withdrawal amount from private balance',
-    scenario: 'private_to_public',
-    computation: 'new_balance = current_balance - withdraw_amount'
+  // Main DeFi operation
+  '0x8fae5df19cb6bc3db4ea7dfc14a9696be683910c9fee64d839a6eef9981129a1': {
+    name: 'defi_operation',
+    description: 'DeFi operation: borrow/withdraw with collateral checks',
+    input_slots: 3,
+    operations: ['smull_constant', 'ge', 'add', 'sub', 'select'],
+    execution_plan: [
+      // Dynamic execution based on input count
+      { op: 'dynamic', inputs: 'auto', output: 'result' }
+    ]
   },
   
-  // Borrow: Health factor calculation (MUL + comparison)
-  'BORROW_PROGRAM': {
-    operations: ['smull', 'gt'],
-    description: 'Borrow: Calculate collateral health factor and check borrowing capacity',
-    scenario: 'health_check',
-    computation: 'health_factor = (collateral_value * collateral_ratio) > borrow_amount'
+  '0xwithdrw000000000000000000000000000000000000000000000000000000000': {
+    name: 'withdraw_with_check',
+    description: 'Withdraw: Check balance >= amount, then subtract',
+    input_slots: 2,
+    operations: ['ge', 'sub', 'select'],
+    execution_plan: [
+      // Inputs: [0]=USDC_balance, [1]=withdraw_amount
+      { op: 'ge', inputs: [0, 1], output: 'temp_a' },
+      { op: 'sub', inputs: [0, 1], output: 'temp_b' },
+      { op: 'select', inputs: ['temp_a', 'temp_b', 0], output: 'result' }
+    ]
   },
   
-  // Liquidation: Multi-step health check with threshold comparison
-  'LIQUIDATION_PROGRAM': {
-    operations: ['smull', 'add', 'gt'],
-    description: 'Liquidation: Check if position is undercollateralized and eligible for liquidation',
-    scenario: 'liquidation_check', 
-    computation: 'liquidation_eligible = (debt_value + penalty) > (collateral_value * liquidation_threshold)'
+  '0xmul0000000000000000000000000000000000000000000000000000000000000': {
+    name: 'complex_borrow_check',
+    description: 'Multi-step: collateral check with balance update',
+    input_slots: 3,
+    operations: ['smull_constant', 'ge', 'add', 'select'],
+    execution_plan: [
+      // Inputs: [0]=SOL_balance, [1]=borrow_amount, [2]=USDC_balance
+      { op: 'smull_constant', inputs: [1], constant: 2, output: 'temp_a' },
+      { op: 'ge', inputs: [0, 'temp_a'], output: 'temp_b' },
+      { op: 'add', inputs: [2, 1], output: 'temp_d' },
+      { op: 'select', inputs: ['temp_b', 'temp_d', 2], output: 'result' }
+    ]
+  },
+  
+  '0xhealthcheck00000000000000000000000000000000000000000000000000000': {
+    name: 'liquidation_health_check',
+    description: 'Health factor: (collateral * price) vs (debt * threshold)',
+    input_slots: 3,
+    operations: ['smull', 'smull_constant', 'gt'],
+    execution_plan: [
+      { op: 'smull', inputs: [0, 2], output: 'collateral_value' },
+      { op: 'smull_constant', inputs: [1], constant: 2, output: 'debt_threshold' },
+      { op: 'gt', inputs: ['collateral_value', 'debt_threshold'], output: 'result' }
+    ]
   }
 };
 
@@ -192,55 +271,79 @@ const DEFI_PROGRAMS = {
 async function executeFHEComputation(job) {
   const startTime = Date.now();
 
-  console.log('[FHE_EXECUTOR] Processing job:', job.job_pda);
-  console.log('[FHE_EXECUTOR] IR digest:', job.ir_digest || 'unknown');
-  console.log('[FHE_EXECUTOR] Operation:', job.operation || 'unknown');
-  
-  // DEMO ONLY: Use ciphertexts field from Gatehouse in-memory DB
-  // In production, jobs would only contain CID references and executor would fetch ciphertexts separately
   const inputCiphertexts = job.ciphertexts || [];
-  console.log('[FHE_EXECUTOR] Input ciphertexts:', inputCiphertexts.length);
-  console.log('[FHE_EXECUTOR] Available job keys:', Object.keys(job));
+  const jobId = job.job_pda.slice(0, 8);
+  logger.info('Job:Processing', 'Starting computation', { job_id: jobId, inputs: inputCiphertexts.length });
 
   try {
-    // Validate inputs
-    if (!inputCiphertexts || inputCiphertexts.length < 2) {
-      throw new Error(`Insufficient input ciphertexts: expected 2, got ${inputCiphertexts.length}`);
+    const irDigest = job.ir_digest;
+    if (!irDigest) {
+      throw new Error('IR digest is required for computation');
     }
 
-    const cid1 = inputCiphertexts[0];
-    const cid2 = inputCiphertexts[1]; 
-    const operation = job.operation || 'deposit';
-    const irDigest = job.ir_digest;
+    // Look up operation definition from IR registry
+    const operation = FHE_OPERATION_REGISTRY[irDigest];
+    if (!operation) {
+      throw new Error(`Unknown IR digest: ${irDigest}. Operation not registered.`);
+    }
 
-    console.log('[FHE_EXECUTOR] Processing CID1:', cid1.cid_pda);
-    console.log('[FHE_EXECUTOR] Processing CID2:', cid2.cid_pda);
+    logger.info('FHE:Operation', operation.description, { 
+      operation: operation.name, 
+      input_slots: operation.input_slots, 
+      steps: operation.execution_plan.length 
+    });
 
-    // Determine FHE program based on IR digest or operation
-    const program = determineFHEProgram(irDigest, operation);
-    console.log('[FHE_EXECUTOR] Selected FHE program:', program.description);
-    console.log('[FHE_EXECUTOR] Operations to perform:', program.operations);
-
-    // Extract ciphertext data directly from job (no CID lookup needed)
-    const { ct1Data, ct2Data } = extractCiphertextDataFromJob(cid1, cid2);
-
-    console.log('[FHE_EXECUTOR] Processing encrypted inputs only - no plaintext access');
+    // Validate input count (allow flexibility for dynamic operations)
+    if (operation.name !== 'defi_operation' && inputCiphertexts.length !== operation.input_slots) {
+      throw new Error(`Input mismatch: operation requires ${operation.input_slots} inputs, got ${inputCiphertexts.length}`);
+    }
     
-    // Display ciphertext elements like demo page
-    console.log('[FHE_EXECUTOR] Ciphertext 1 elements:', ct1Data.length, 'total');
-    console.log('[FHE_EXECUTOR] Ciphertext 1 preview:', `[${ct1Data.slice(16, 16 + 32).join(', ')}, ...]`);
-    
-    console.log('[FHE_EXECUTOR] Ciphertext 2 elements:', ct2Data.length, 'total');
-    console.log('[FHE_EXECUTOR] Ciphertext 2 preview:', `[${ct2Data.slice(16, 16 + 32).join(', ')}, ...]`);
+    // For dynamic operations, adjust based on actual input count
+    if (operation.name === 'defi_operation') {
+      if (inputCiphertexts.length < 2 || inputCiphertexts.length > 3) {
+        throw new Error(`DeFi operation requires 2-3 inputs, got ${inputCiphertexts.length}`);
+      }
+    }
 
-    // Perform FHE computation based on program
-    const result = await performFHEComputation(program, ct1Data, ct2Data);
+    // Extract ciphertext data from all inputs
+    const inputData = [];
+    for (let i = 0; i < inputCiphertexts.length; i++) {
+      const ct = inputCiphertexts[i];
+      
+      let ctData;
+      if (ct.ciphertext && typeof ct.ciphertext === 'object') {
+        if (ct.ciphertext.encrypted_data && ct.ciphertext.encrypted_data.encrypted_data) {
+          ctData = ct.ciphertext.encrypted_data.encrypted_data;
+        } else if (ct.ciphertext.encrypted_data) {
+          ctData = ct.ciphertext.encrypted_data;
+        } else {
+          throw new Error(`Invalid ciphertext format for input[${i}]`);
+        }
+      } else {
+        throw new Error(`Missing ciphertext data for input[${i}]`);
+      }
+      
+      inputData.push(ctData);
+    }
+
+    logger.debug('FHE:Computation', 'Inputs extracted, starting computation', { count: inputData.length });
+
+    // Execute FHE computation
+    const result = await executeUniversalFHEComputation(operation, inputData);
 
     // Generate deterministic result CID
-    const resultCiphertext = generateDeterministicResult(result, job, program, inputCiphertexts.length);
+    const resultCiphertext = generateDeterministicResult(result, job, operation, inputCiphertexts.length);
 
     const executionTime = Date.now() - startTime;
-    console.log('[FHE_EXECUTOR] FHE computation completed in', executionTime, 'ms');
+    
+    // Final result summary
+    if (resultCiphertext.debug_decrypted_result !== null && resultCiphertext.debug_decrypted_result !== undefined) {
+      logger.info('FHE:Computation', 'Computation completed successfully', { 
+        operation: operation.name, 
+        result: resultCiphertext.debug_decrypted_result, 
+        time_ms: executionTime 
+      });
+    }
 
     return {
       success: true,
@@ -250,7 +353,7 @@ async function executeFHEComputation(job) {
 
   } catch (error) {
     const executionTime = Date.now() - startTime;
-    console.error('[FHE_EXECUTOR] FHE computation failed:', error.message);
+    logger.error('FHE:Computation', 'Computation failed', { error: error.message, time_ms: executionTime });
     
     return {
       success: false,
@@ -260,34 +363,156 @@ async function executeFHEComputation(job) {
   }
 }
 
-// Determine DeFi FHE program based on IR digest or operation
-function determineFHEProgram(irDigest, operation) {
-  // If IR digest is provided, use it to determine exact program
-  if (irDigest) {
-    // Hash-based program selection (deterministic)
-    const hashValue = parseInt(irDigest.slice(-4), 16) % Object.keys(DEFI_PROGRAMS).length;
-    const programKey = Object.keys(DEFI_PROGRAMS)[hashValue];
-    console.log('[FHE_EXECUTOR] IR-based DeFi program selection:', programKey);
-    return DEFI_PROGRAMS[programKey];
-  }
+// FHE computation executor
+async function executeUniversalFHEComputation(operation, inputData) {
+  try {
+    // Convert all input data to FHE16 Int32Ptr format
+    const inputPtrs = [];
+    for (let i = 0; i < inputData.length; i++) {
+        const ptr = convertJSONToInt32Ptr(inputData[i]);
+      inputPtrs.push(ptr);
+    }
 
-  // Fallback to operation-based selection
-  switch (operation) {
-    case 'deposit':
-      return DEFI_PROGRAMS.DEPOSIT_PROGRAM;
-    case 'withdraw':
-      return DEFI_PROGRAMS.WITHDRAW_PROGRAM;
-    case 'borrow':
-      return DEFI_PROGRAMS.BORROW_PROGRAM;
-    case 'liquidation':
-      return DEFI_PROGRAMS.LIQUIDATION_PROGRAM;
-    default:
-      return DEFI_PROGRAMS.DEPOSIT_PROGRAM;
+    // Storage for intermediate values and results
+    const computeStack = {};
+    
+    // Initialize input variables in compute stack
+    for (let i = 0; i < inputPtrs.length; i++) {
+      computeStack[i] = inputPtrs[i];
+    }
+
+    
+    // Execute each step in the execution plan
+    for (let stepIndex = 0; stepIndex < operation.execution_plan.length; stepIndex++) {
+      const step = operation.execution_plan[stepIndex];
+
+      let resultPtr;
+      
+      // Execute the FHE operation based on type
+      switch (step.op) {
+        case 'dynamic':
+          // Handle dynamic DeFi operations based on input count
+          if (inputPtrs.length === 2) {
+            // 2 inputs: Simple withdraw check (balance >= amount, then subtract)
+            logger.debug('FHE:Operation', 'Executing dynamic withdraw operation', { inputs: 2 });
+            const checkPtr = FHE16.ge(computeStack[0], computeStack[1]); // balance >= amount
+            
+            // WORKAROUND: Use NEG + ADD instead of SUB to avoid FHE16 SUB bug
+            const negAmountPtr = FHE16.neg(computeStack[1]);              // -amount
+            const subPtr = FHE16.add(computeStack[0], negAmountPtr);      // balance + (-amount) = balance - amount
+            
+            resultPtr = FHE16.select(checkPtr, subPtr, computeStack[0]);  // if sufficient then subtract, else keep original
+          } else if (inputPtrs.length === 3) {
+            // 3 inputs: Complex borrow (collateral check + balance update)
+            logger.debug('FHE:Operation', 'Executing dynamic borrow operation', { inputs: 3 });
+            const collateralCheck = FHE16.smullConst_i32(computeStack[1], 2); // borrow_amount * 2
+            const sufficientCollateral = FHE16.ge(computeStack[0], collateralCheck); // SOL >= (borrow * 2)
+            const newBalance = FHE16.add(computeStack[2], computeStack[1]); // USDC + borrow_amount
+            resultPtr = FHE16.select(sufficientCollateral, newBalance, computeStack[2]); // if sufficient then add, else keep original
+          } else {
+            throw new Error(`Dynamic operation supports 2-3 inputs, got ${inputPtrs.length}`);
+          }
+          break;
+          
+        case 'add':
+          const [addInput1, addInput2] = step.inputs.map(input => 
+            typeof input === 'number' ? computeStack[input] : computeStack[input]
+          );
+          resultPtr = FHE16.add(addInput1, addInput2);
+          break;
+        
+        case 'sub':
+          const [subInput1, subInput2] = step.inputs.map(input => 
+            typeof input === 'number' ? computeStack[input] : computeStack[input]
+          );
+          resultPtr = FHE16.sub(subInput1, subInput2);
+          break;
+          
+        case 'ge':
+          const [geInput1, geInput2] = step.inputs.map(input => 
+            typeof input === 'number' ? computeStack[input] : computeStack[input]
+          );
+          resultPtr = FHE16.ge(geInput1, geInput2);
+          break;
+          
+        case 'smull':
+          const [mulInput1, mulInput2] = step.inputs.map(input => 
+            typeof input === 'number' ? computeStack[input] : computeStack[input]
+          );
+          resultPtr = FHE16.smull(mulInput1, mulInput2);
+          break;
+          
+        case 'smull_constant':
+          const mulConstInput = typeof step.inputs[0] === 'number' ? 
+            computeStack[step.inputs[0]] : computeStack[step.inputs[0]];
+          const constant = step.constant || 1;
+          resultPtr = FHE16.smullConst_i32(mulConstInput, constant);
+          break;
+          
+        case 'gt':
+          const [gtInput1, gtInput2] = step.inputs.map(input => 
+            typeof input === 'number' ? computeStack[input] : computeStack[input]
+          );
+          resultPtr = FHE16.gt(gtInput1, gtInput2);
+          break;
+          
+        case 'select':
+          const [condition, trueVal, falseVal] = step.inputs.map(input => 
+            typeof input === 'number' ? computeStack[input] : computeStack[input]
+          );
+          resultPtr = FHE16.select(condition, trueVal, falseVal);
+          break;
+          
+        default:
+          throw new Error(`Unsupported FHE operation: ${step.op}`);
+      }
+
+      // Store result in compute stack
+      computeStack[step.output] = resultPtr;
+    }
+
+    // Return the final result
+    const finalResult = computeStack['result'];
+    if (!finalResult) {
+      throw new Error('Execution plan did not produce a result');
+    }
+
+    // Convert result Int32Ptr back to JSON array format
+    const ref = require('ref-napi');
+    const resultLength = 16 + 1040 * 32;
+    const resultBuffer = ref.reinterpret(finalResult, resultLength * 4, 0);
+    const resultArray = [];
+    
+    for (let i = 0; i < resultLength; i++) {
+      resultArray.push(resultBuffer.readInt32LE(i * 4));
+    }
+
+    // DEMO ONLY: Decrypt result for debugging
+    let decryptedResult = null;
+    if (secretKey) {
+      try {
+        decryptedResult = FHE16.decInt(finalResult, secretKey);
+        logger.debug('FHE:Debug', 'Result decrypted', { value: decryptedResult });
+      } catch (decError) {
+        logger.warn('FHE:Debug', 'Decryption failed', { error: decError.message });
+      }
+    }
+
+    return {
+      encrypted_data: resultArray,
+      scheme: 'FHE16_0.0.1v',
+      timestamp: Date.now(),
+      operation: operation.name,
+      debug_decrypted_result: decryptedResult
+    };
+
+  } catch (error) {
+    logger.error('FHE:Computation', 'Universal computation failed', { error: error.message });
+    throw error;
   }
 }
 
-// DEMO ONLY: Extract ciphertext data directly from job objects (in-memory DB demo)
-// In production, executor would fetch ciphertexts separately using CID references
+// Extract ciphertext data from job objects
 function extractCiphertextDataFromJob(cid1, cid2) {
   let ct1Data, ct2Data;
 
@@ -325,150 +550,88 @@ function extractCiphertextDataFromJob(cid1, cid2) {
 }
 
 // Convert JSON ciphertext data to FHE16 Int32Ptr
-// Strategy: Create a dummy ciphertext with encInt, then copy the actual values using ref-napi
 function convertJSONToInt32Ptr(ciphertextArray) {
   try {
-    // Validate input: should be 16 + 1040*32 = 33296 integers
+    // Validate input
     const expectedLength = 16 + 1040 * 32;
     if (!ciphertextArray || ciphertextArray.length !== expectedLength) {
       throw new Error(`Invalid ciphertext length: expected ${expectedLength}, got ${ciphertextArray?.length || 0}`);
     }
 
-    console.log(`[FHE_EXECUTOR] Converting ${ciphertextArray.length} integers to Int32Ptr`);
-    
-    // Step 1: Create a dummy ciphertext using encInt with message=0, bits=32
-    // This allocates proper memory structure for a ciphertext
+    // Convert to Int32Ptr
     const dummyCiphertextPtr = FHE16.encInt(0, 32);
-    
     if (!dummyCiphertextPtr) {
       throw new Error('Failed to create dummy ciphertext');
     }
     
-    console.log('[FHE_EXECUTOR] Created dummy ciphertext with proper memory allocation');
-    console.log('[FHE_EXECUTOR] Dummy ciphertext pointer address:', dummyCiphertextPtr.address);
-    
-    // Step 2: Copy actual ciphertext values from JSON array to the dummy ciphertext
-    // Use ref-napi to write to the pointer memory
     const ref = require('ref-napi');
-    const int32 = ref.types.int32;
-    
-    // Reinterpret the pointer as a buffer that can hold all our data
     const ctBuffer = ref.reinterpret(dummyCiphertextPtr, expectedLength * 4, 0);
-    
-    console.log('[FHE_EXECUTOR] Copying ciphertext values to memory...');
-    
-    // Copy each int32 value to the buffer
     for (let i = 0; i < ciphertextArray.length; i++) {
       ctBuffer.writeInt32LE(ciphertextArray[i], i * 4);
     }
     
-    console.log('[FHE_EXECUTOR] Successfully copied ciphertext data to Int32Ptr');
-    
-    // Verify: Read back ALL values and check if they match
-    console.log('[FHE_EXECUTOR] Verifying ALL copied values...');
-    let mismatchCount = 0;
-    let firstMismatchIndex = -1;
-    
-    for (let i = 0; i < ciphertextArray.length; i++) {
-      const readValue = ctBuffer.readInt32LE(i * 4);
-      if (readValue !== ciphertextArray[i]) {
-        mismatchCount++;
-        if (firstMismatchIndex === -1) {
-          firstMismatchIndex = i;
-          console.log(`[FHE_EXECUTOR] ❌ First mismatch at index ${i}: Expected ${ciphertextArray[i]}, Got ${readValue}`);
-        }
-      }
-    }
-    
-    if (mismatchCount === 0) {
-      console.log(`[FHE_EXECUTOR] ✅ Verification PASSED: All ${ciphertextArray.length} values match perfectly!`);
-    } else {
-      console.log(`[FHE_EXECUTOR] ❌ Verification FAILED: ${mismatchCount} out of ${ciphertextArray.length} values mismatch`);
-      throw new Error(`Ciphertext copy verification failed: ${mismatchCount} mismatches`);
-    }
-    
-    // Show first and last few values as sample
-    console.log('[FHE_EXECUTOR] Sample check - First 5 values:');
-    for (let i = 0; i < 5; i++) {
-      console.log(`  [${i}] ${ctBuffer.readInt32LE(i * 4)}`);
-    }
-    console.log('[FHE_EXECUTOR] Sample check - Last 5 values:');
-    for (let i = ciphertextArray.length - 5; i < ciphertextArray.length; i++) {
-      console.log(`  [${i}] ${ctBuffer.readInt32LE(i * 4)}`);
-    }
     
     return dummyCiphertextPtr;
     
   } catch (error) {
-    console.error('[FHE_EXECUTOR] JSON to Int32Ptr conversion failed:', error.message);
-    console.error('[FHE_EXECUTOR] Stack trace:', error.stack);
+    logger.error('FHE:Conversion', 'JSON to Int32Ptr conversion failed', { 
+      error: error.message, 
+      stack: error.stack 
+    });
     throw error;
   }
 }
 
-// Perform DeFi-specific FHE computation on encrypted data only
-async function performFHEComputation(program, ct1Data, ct2Data) {
+// Perform FHE computation on encrypted data
+async function performFHEComputation(program, ct1Data, ct2Data, ct3Data = null) {
   try {
-    console.log(`[FHE_EXECUTOR] Executing DeFi scenario: ${program.scenario}`);
-    console.log(`[FHE_EXECUTOR] Computation: ${program.computation}`);
+    logger.info('FHE:Computation', 'Executing DeFi scenario', { 
+      scenario: program.scenario, 
+      computation: program.computation 
+    });
     
-    // Convert JSON ciphertext data to FHE16 Int32Ptr
-    console.log('[FHE_EXECUTOR] Converting JSON ciphertexts to Int32Ptr...');
-    console.log('[FHE_EXECUTOR] CT1 data length:', ct1Data.length);
-    console.log('[FHE_EXECUTOR] CT2 data length:', ct2Data.length);
-    
-    // Convert JSON arrays to FHE16 Int32Ptr format
-    console.log('[FHE_EXECUTOR] ========== Converting CT1 ==========');
+    // Convert to FHE16 Int32Ptr
     const ct1Ptr = convertJSONToInt32Ptr(ct1Data);
-    
-    console.log('[FHE_EXECUTOR] ========== Converting CT2 ==========');
     const ct2Ptr = convertJSONToInt32Ptr(ct2Data);
+    
+    let ct3Ptr = null;
+    if (ct3Data) {
+      ct3Ptr = convertJSONToInt32Ptr(ct3Data);
+    }
     
     if (!ct1Ptr || !ct2Ptr) {
       throw new Error('Failed to convert JSON ciphertexts to Int32Ptr');
     }
-
-    console.log('[FHE_EXECUTOR] ========================================');
-    console.log('[FHE_EXECUTOR] ✅ Both ciphertexts successfully converted and verified!');
-    console.log('[FHE_EXECUTOR] ========================================');
+    if (ct3Data && !ct3Ptr) {
+      throw new Error('Failed to convert CT3 JSON ciphertext to Int32Ptr');
+    }
     
     let resultPtr;
     
-    // Execute DeFi-specific computation logic using Int32Ptr
-    console.log('[FHE_EXECUTOR] Executing FHE operations...');
-    
     switch (program.scenario) {
-      case 'public_to_private': // DEPOSIT
-        console.log('[FHE_EXECUTOR] DEPOSIT: current_balance + deposit_amount');
-        console.log('[FHE_EXECUTOR] Calling FHE16.add(ct1Ptr, ct2Ptr)...');
+      case 'deposit_operation':
+        logger.debug('FHE:Operation', 'Executing deposit operation');
         resultPtr = FHE16.add(ct1Ptr, ct2Ptr);
-        console.log('[FHE_EXECUTOR] ADD operation completed, result pointer:', resultPtr?.address || resultPtr);
         break;
         
-      case 'private_to_public': // WITHDRAW
-        console.log('[FHE_EXECUTOR] WITHDRAW: current_balance - withdraw_amount');
-        console.log('[FHE_EXECUTOR] Calling FHE16.sub(ct1Ptr, ct2Ptr)...');
-        resultPtr = FHE16.sub(ct1Ptr, ct2Ptr);
-        console.log('[FHE_EXECUTOR] SUB operation completed, result pointer:', resultPtr?.address || resultPtr);
+      case 'withdraw_operation':
+        logger.debug('FHE:Operation', 'Executing withdraw operation');
+        resultPtr = FHE16.ge(ct2Ptr, ct1Ptr); 
         break;
         
-      case 'health_check': // BORROW
-        console.log('[FHE_EXECUTOR] BORROW: collateral_value * ratio > borrow_amount');
-        console.log('[FHE_EXECUTOR] Calling FHE16.smull(ct1Ptr, ct2Ptr)...');
-        resultPtr2 = FHE16.smull(ct1Ptr, ct2Ptr);
-        resultPtr = FHE16.gt(resultPtr2, ct1Ptr);
-        console.log('[FHE_EXECUTOR] SMULL operation completed, result pointer:', resultPtr?.address || resultPtr);
+      case 'borrow_operation':
+        logger.debug('FHE:Operation', 'Executing borrow operation');
+        const aPtr = FHE16.smullConstant(ct2Ptr, 2);
+        const bPtr = FHE16.ge(ct1Ptr, aPtr);
+        const dPtr = FHE16.add(ct3Ptr, ct2Ptr);
+        resultPtr = FHE16.select(bPtr, dPtr, ct3Ptr);
         break;
         
-      case 'liquidation_check': // LIQUIDATION
-        console.log('[FHE_EXECUTOR] LIQUIDATION: debt + penalty > collateral * threshold');
-        console.log('[FHE_EXECUTOR] Step 1: Calling FHE16.add(ct1Ptr, ct2Ptr) for debt + penalty...');
+      case 'liquidation_check':
+        logger.debug('FHE:Operation', 'Executing liquidation check operation');
         const debtPenaltyPtr = FHE16.add(ct1Ptr, ct2Ptr);
-        console.log('[FHE_EXECUTOR] Step 2: Calling FHE16.smull(ct2Ptr, ct1Ptr) for collateral * threshold...');
         const collateralThresholdPtr = FHE16.smull(ct2Ptr, ct1Ptr);
-        console.log('[FHE_EXECUTOR] Step 3: Calling FHE16.gt(debtPenaltyPtr, collateralThresholdPtr)...');
         resultPtr = FHE16.gt(debtPenaltyPtr, collateralThresholdPtr);
-        console.log('[FHE_EXECUTOR] LIQUIDATION check completed, result pointer:', resultPtr?.address || resultPtr);
         break;
         
       default:
@@ -480,30 +643,23 @@ async function performFHEComputation(program, ct1Data, ct2Data) {
     }
 
     // Convert result Int32Ptr back to JSON array format
-    // Read the ciphertext data from memory using ref-napi (same size as input: 33296 integers)
     const ref = require('ref-napi');
     const resultLength = 16 + 1040 * 32;
     const resultBuffer = ref.reinterpret(resultPtr, resultLength * 4, 0);
     const resultArray = [];
     
-    console.log('[FHE_EXECUTOR] Reading result from memory...');
     for (let i = 0; i < resultLength; i++) {
       resultArray.push(resultBuffer.readInt32LE(i * 4));
     }
-    
-    console.log('[FHE_EXECUTOR] Result converted to', resultArray.length, 'integers');
-    
-    // Verify: Show first few result values
-    console.log('[FHE_EXECUTOR] Result preview (first 10 values):', resultArray.slice(0, 10));
 
-    // Verify result by decryption (if secret key available)
+    // Decrypt for debugging
     let decryptedResult = null;
     if (secretKey) {
       try {
         decryptedResult = FHE16.decInt(resultPtr, secretKey);
-        console.log('[FHE_EXECUTOR] FHE computation result:', decryptedResult);
+        logger.debug('FHE:Debug', 'Result decrypted', { value: decryptedResult, operation: operation.name });
       } catch (decError) {
-        console.warn('[FHE_EXECUTOR] Could not decrypt result:', decError.message);
+        logger.warn('FHE:Debug', 'Decryption failed', { error: decError.message });
       }
     }
 
@@ -511,12 +667,12 @@ async function performFHEComputation(program, ct1Data, ct2Data) {
       encrypted_data: resultArray,
       scheme: 'FHE16_0.0.1v',
       timestamp: Date.now(),
-      operation: program.operations.join('_'),
-      decrypted_result: decryptedResult
+      operation: operation.name,
+      debug_decrypted_result: decryptedResult
     };
 
   } catch (error) {
-    console.error('[FHE_EXECUTOR] FHE computation failed:', error.message);
+    logger.error('FHE:Computation', 'FHE computation failed', { error: error.message });
     throw error;
   }
 }
@@ -534,7 +690,7 @@ function generateDeterministicResult(result, job, program, inputCount) {
     ir_digest: job.ir_digest,
     timestamp: Date.now(),
     scheme: 'FHE16_0.0.1v',
-    decrypted_result: result.decrypted_result
+    debug_decrypted_result: result.debug_decrypted_result
   };
 }
 
@@ -558,37 +714,36 @@ async function pollForJobs() {
     const jobsData = await fetchJobs();
 
     if (!jobsData || !jobsData.jobs || jobsData.jobs.length === 0) {
-      console.log('[FHE_EXECUTOR] No jobs available');
       return;
     }
 
     const job = jobsData.jobs[0];
     const jobPda = job.job_pda;
+    const jobId = jobPda.slice(0, 8);
 
-    console.log('[FHE_EXECUTOR] Found job:', jobPda);
+    logger.info('Job:Polling', 'Job found, starting processing', { job_id: jobId });
     isProcessing = true;
 
-    // Claim the job
-    console.log('[FHE_EXECUTOR] Claiming job...');
     await claimJob(jobPda);
-    console.log('[FHE_EXECUTOR] Job claimed successfully');
-
-    // Execute FHE computation
     const result = await executeFHEComputation(job);
-
-    // Submit result
-    console.log('[FHE_EXECUTOR] Submitting result...');
     await submitResult(
       jobPda,
       result.success,
       result.resultCiphertext,
-      null,
+      result.error || null,
       result.executionTime
     );
-    console.log('[FHE_EXECUTOR] Result submitted successfully');
+    
+    if (result.success && result.resultCiphertext?.debug_decrypted_result !== undefined) {
+      logger.info('Job:Result', 'Job completed successfully', { 
+        job_id: jobId, 
+        result: result.resultCiphertext.debug_decrypted_result,
+        time_ms: result.executionTime
+      });
+    }
 
   } catch (error) {
-    console.error('[FHE_EXECUTOR] Error processing job:', error.message);
+    logger.error('Job:Processing', 'Job processing failed', { error: error.message });
   } finally {
     isProcessing = false;
   }
@@ -616,26 +771,24 @@ const server = http.createServer((req, res) => {
 
 // Start server
 async function start() {
-  console.log('[FHE_EXECUTOR] Starting FHE Executor Server...');
-  console.log('[FHE_EXECUTOR] Executor ID:', EXECUTOR_ID);
-  console.log('[FHE_EXECUTOR] Gatehouse URL:', GATEHOUSE_URL);
+  logger.info('Server', 'Starting FHE Executor Server');
+  logger.info('Server', 'Configuration', { 
+    gatehouse: GATEHOUSE_URL, 
+    port: EXECUTOR_PORT,
+    executor_id: EXECUTOR_ID
+  });
 
-  // Initialize FHE16
   const initialized = await initFHE16();
   if (!initialized) {
-    console.error('[FHE_EXECUTOR] Failed to initialize FHE16. Exiting...');
+    logger.error('Server', 'Failed to initialize FHE16');
     process.exit(1);
   }
 
-  // Start HTTP server
   server.listen(EXECUTOR_PORT, () => {
-    console.log(`[FHE_EXECUTOR] Server listening on port ${EXECUTOR_PORT}`);
-    console.log(`[FHE_EXECUTOR] Health check: http://localhost:${EXECUTOR_PORT}/health`);
-    console.log(`[FHE_EXECUTOR] Status endpoint: http://localhost:${EXECUTOR_PORT}/status`);
+    logger.info('Server', 'Server ready', { port: EXECUTOR_PORT });
   });
 
-  // Start polling
-  console.log(`[FHE_EXECUTOR] Starting job polling (interval: ${POLL_INTERVAL}ms)...`);
+  logger.info('Job:Polling', 'Starting job polling', { interval_sec: POLL_INTERVAL/1000 });
   setInterval(pollForJobs, POLL_INTERVAL);
 
   // Initial poll
@@ -644,23 +797,23 @@ async function start() {
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
-  console.log('\n[FHE_EXECUTOR] Shutting down...');
+  logger.info('Server', 'Shutting down (SIGINT)');
   server.close(() => {
-    console.log('[FHE_EXECUTOR] Server closed');
+    logger.info('Server', 'Server closed');
     process.exit(0);
   });
 });
 
 process.on('SIGTERM', () => {
-  console.log('\n[FHE_EXECUTOR] Shutting down...');
+  logger.info('Server', 'Shutting down (SIGTERM)');
   server.close(() => {
-    console.log('[FHE_EXECUTOR] Server closed');
+    logger.info('Server', 'Server closed');
     process.exit(0);
   });
 });
 
 // Start the executor
 start().catch((error) => {
-  console.error('[FHE_EXECUTOR] Fatal error:', error);
+  logger.error('Server', 'Fatal error', { error: error.message });
   process.exit(1);
 });

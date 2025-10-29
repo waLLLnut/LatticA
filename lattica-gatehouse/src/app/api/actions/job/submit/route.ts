@@ -31,21 +31,34 @@ const MAX_CIDS = 16
 // Demo: Fixed batch window for simplified workflow
 const DEMO_BATCH_WINDOW = new PublicKey('11111111111111111111111111111111')
 
-// Demo: Predefined IR digests for common operations
-const IR_DIGESTS: Record<string, string> = {
-  'deposit': '0x' + 'ADD0'.padEnd(64, '0'),      // FHE16.ADD for deposit
-  'withdraw': '0x' + 'WITHDRAW'.padEnd(64, '0'), // Withdrawal operation
-  'borrow': '0x' + 'MUL0'.padEnd(64, '0'),       // FHE16.MUL for borrow
-  'liquidation': '0x' + 'HEALTHCHECK'.padEnd(64, '0'), // Health factor check (0.5 LTV)
+const UNIVERSAL_IR_REGISTRY: Record<string, { name: string; description: string; input_slots: number }> = {
+  '0xadd0000000000000000000000000000000000000000000000000000000000000': {
+    name: 'binary_add',
+    description: 'Basic addition: output = input[0] + input[1]',
+    input_slots: 2
+  },
+  '0xwithdrw000000000000000000000000000000000000000000000000000000000': {
+    name: 'withdraw_with_check',
+    description: 'Withdraw: Check balance >= amount, then subtract',
+    input_slots: 2
+  },
+  '0xmul0000000000000000000000000000000000000000000000000000000000000': {
+    name: 'complex_borrow_check',
+    description: 'Multi-step: collateral check with balance update',
+    input_slots: 3
+  },
+  '0xhealthcheck00000000000000000000000000000000000000000000000000000': {
+    name: 'liquidation_health_check',
+    description: 'Health factor: (collateral * price) vs (debt * threshold)',
+    input_slots: 3
+  }
 }
 
-// Demo: Required CID count for each operation (for validation)
-const REQUIRED_CID_COUNTS: Record<string, { min: number; max: number; description: string }> = {
-  'deposit': { min: 2, max: 2, description: '2 CIDs: amount1 + amount2 (FHE16.ADD)' },
-  'withdraw': { min: 1, max: 1, description: '1 CID: withdrawal amount' },
-  'borrow': { min: 2, max: 2, description: '2 CIDs: amount * interest_rate (FHE16.MUL)' },
-  'liquidation': { min: 3, max: 3, description: '3 CIDs: collateral, debt, price (health check @ 0.5 LTV)' },
-  'custom': { min: 1, max: MAX_CIDS, description: `1-${MAX_CIDS} CIDs for custom operation` },
+const LEGACY_OPERATION_MAP: Record<string, string> = {
+  'deposit': '0xadd0000000000000000000000000000000000000000000000000000000000000',
+  'withdraw': '0xwithdrw000000000000000000000000000000000000000000000000000000000',
+  'borrow': '0xmul0000000000000000000000000000000000000000000000000000000000000',
+  'liquidation': '0xhealthcheck00000000000000000000000000000000000000000000000000000'
 }
 
 function cors(res: NextResponse) {
@@ -156,8 +169,12 @@ export async function GET(request: NextRequest) {
       if (!Array.isArray(parsed) && parsed && Array.isArray(parsed.cids)) parsed = parsed.cids
       const cid_count = Array.isArray(parsed) ? parsed.length : 0
 
-      // Check operation requirements
-      const requirement = REQUIRED_CID_COUNTS[operationParam] || REQUIRED_CID_COUNTS['custom']
+      // Get IR digest and check requirements
+      const irDigest = LEGACY_OPERATION_MAP[operationParam] || operationParam
+      const irDef = UNIVERSAL_IR_REGISTRY[irDigest]
+      const requirement = irDef ? 
+        { min: irDef.input_slots, max: irDef.input_slots, description: `${irDef.input_slots} CIDs: ${irDef.description}` } :
+        { min: 1, max: MAX_CIDS, description: `1-${MAX_CIDS} CIDs for custom operation` }
       const isValidCount = cid_count >= requirement.min && cid_count <= requirement.max
 
       preview = {
@@ -187,7 +204,12 @@ export async function GET(request: NextRequest) {
     domain: { ...fhe, domain_hash },
     policy: {
       inputRequirement: 'cids = JSON array of CID PDA addresses from /registerCIDs',
-      cidRequirements: REQUIRED_CID_COUNTS,
+      supportedOperations: Object.entries(UNIVERSAL_IR_REGISTRY).map(([digest, def]) => ({
+        ir_digest: digest,
+        name: def.name,
+        description: def.description,
+        input_slots: def.input_slots
+      })),
       decryption: 'Owner-Controlled (private) or Protocol-Managed (shared access)',
       canonicalization: 'policy_ctx is canonical-JSON stringified (sorted keys).',
       remaining_accounts: 'CID handles are passed as remaining_accounts in transaction',
@@ -215,9 +237,9 @@ export async function GET(request: NextRequest) {
               type: 'select',
               required: true,
               options: [
-                { label: 'Deposit (2 CIDs: FHE16.ADD)', value: 'deposit', selected: true },
-                { label: 'Withdraw (1 CID)', value: 'withdraw' },
-                { label: 'Borrow (2 CIDs: FHE16.MUL)', value: 'borrow' },
+                { label: 'Deposit (2 CIDs: SOL_balance + deposit_amount)', value: 'deposit', selected: true },
+                { label: 'Withdraw (2 CIDs: USDC_balance + withdraw_amount)', value: 'withdraw' },
+                { label: 'Borrow (3 CIDs: SOL_balance + borrow_amount + USDC_balance)', value: 'borrow' },
                 { label: 'Liquidation (3 CIDs: Health Check)', value: 'liquidation' },
                 { label: 'Custom (1-16 CIDs)', value: 'custom' },
               ],
@@ -336,8 +358,12 @@ export async function POST(req: NextRequest) {
       operation
     })
 
-    // Validate CID count based on operation type
-    const cidRequirement = REQUIRED_CID_COUNTS[operation] || REQUIRED_CID_COUNTS['custom']
+    // Validate CID count based on IR digest/operation type
+    const irDigest = LEGACY_OPERATION_MAP[operation] || operation
+    const irDef = UNIVERSAL_IR_REGISTRY[irDigest]
+    const cidRequirement = irDef ? 
+      { min: irDef.input_slots, max: irDef.input_slots, description: `${irDef.input_slots} CIDs: ${irDef.description}` } :
+      { min: 1, max: MAX_CIDS, description: `1-${MAX_CIDS} CIDs for custom operation` }
     if (parsedCids.length < cidRequirement.min || parsedCids.length > cidRequirement.max) {
       return cors(NextResponse.json({
         message: `Invalid CID count for operation '${operation}'`,
@@ -371,24 +397,28 @@ export async function POST(req: NextRequest) {
     // Batch window: Use fixed demo batch or backward compatibility
     const batchPubkey = batch_raw ? new PublicKey(batch_raw) : DEMO_BATCH_WINDOW
 
-    // IR Digest: Map operation to predefined digest or use custom
+    // IR Digest: Support both legacy operations and direct IR digests
     let ir_digest: string
-    if (operation === 'custom' && ir_digest_raw) {
+    if (ir_digest_raw) {
+      // Direct IR digest provided
       ir_digest = String(ir_digest_raw)
       if (!/^0x[0-9a-fA-F]{64}$/.test(ir_digest)) {
-        return cors(NextResponse.json({ message: 'Custom ir_digest must be 0x + 64 hex chars' }, { status: 400 }))
+        return cors(NextResponse.json({ message: 'ir_digest must be 0x + 64 hex chars' }, { status: 400 }))
       }
-    } else if (operation === 'custom') {
-      return cors(NextResponse.json({ message: 'Custom operation requires ir_digest parameter' }, { status: 400 }))
+    } else if (LEGACY_OPERATION_MAP[operation]) {
+      // Legacy operation mapping
+      ir_digest = LEGACY_OPERATION_MAP[operation]
+      log.debug('Using legacy operation mapping', { operation, ir_digest })
     } else {
-      ir_digest = IR_DIGESTS[operation]
-      if (!ir_digest) {
-        return cors(NextResponse.json({
-          message: 'Invalid operation',
-          valid_operations: Object.keys(IR_DIGESTS).concat(['custom'])
+      // Assume operation is an IR digest
+      ir_digest = operation
+      if (!/^0x[0-9a-fA-F]{64}$/.test(ir_digest)) {
+        return cors(NextResponse.json({ 
+          message: 'Invalid operation or IR digest',
+          supported_operations: Object.keys(LEGACY_OPERATION_MAP),
+          note: 'For custom operations, provide a valid 64-char hex IR digest'
         }, { status: 400 }))
       }
-      log.debug('Using IR digest for operation', { operation, ir_digest })
     }
 
     // Build policy_ctx:
@@ -526,6 +556,13 @@ export async function POST(req: NextRequest) {
     // Hashes (nonce removed for simplified demo)
     const cid_set_id = calcCidSetId(parsedCids)
     const commitment = calcCommitment(cid_set_id, ir_digest, policy_hash, domain_hash)
+
+    log.info('Job submission', {
+      operation,
+      ir_digest: ir_digest.slice(0, 10) + '...',
+      commitment: commitment.slice(0, 10) + '...',
+      cid_count: parsedCids.length
+    })
 
     // PDAs
     const configPda = deriveConfigPda(gatekeeperProgram)

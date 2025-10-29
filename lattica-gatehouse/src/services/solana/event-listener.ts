@@ -389,6 +389,13 @@ export class GatekeeperEventListener {
       slot: event.slot,
       tx: event.tx_signature.slice(0, 8) + '...',
     })
+    
+    // DEBUG: Log parsed ir_digest and commitment from event
+    log.info('Parsed event hashes', {
+      ir_digest: event.ir_digest?.slice(0, 10) + '...',
+      commitment: event.commitment?.slice(0, 10) + '...',
+      job: event.job.slice(0, 8) + '...'
+    })
 
     // Deduplicate by job PDA (prevent duplicate processing of same job)
     if (this.processedJobPDAs.has(event.job)) {
