@@ -4,9 +4,6 @@ _Confidential program: privacy rail for institutions_
 - LatticA builds **Next**, the Solana‑native confidential computing layer that makes encrypted data computable and verifiable anywhere — from mobile to server — through our portable **FHE16** stack (Fully Homomorphic Encryption).
 - Institutions can lend, swap, or manage risk without revealing private inputs until they choose to, establishing the foundation for deterministic, verifiable privacy on‑chain.
 
-## Beyond privacy, we secure provenance
-By combining **FHE16** with **zkTLS** (planned), LatticA ensures every encrypted input is cryptographically tied to its true source without leaking financial data — forming the trust execution for compliant, data‑driven DeFi.
-
 **Good‑bye front‑running. Hello institutions.**
 
 ## Backers
