@@ -21,7 +21,7 @@ Currently raising seed round.
 
 ## Founders
 - **Seounghwan Lee** — CEO — [LinkedIn](https://www.linkedin.com/in/seunghwan-lee-242ab918a/)
-- **Dohyuk Kim** — CEO — [LinkedIn](https://www.linkedin.com/in/dohyuk-kim-887474376/)
+- **Dohyuk Kim** — CTO — [LinkedIn](https://www.linkedin.com/in/dohyuk-kim-887474376/)
 - **Dong‑Joon Shin** — CSO — [LinkedIn](https://www.linkedin.com/in/dong-joon-shin-489447374/)
 
 ## Watch / Connect
