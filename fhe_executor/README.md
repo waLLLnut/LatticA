@@ -1,56 +1,61 @@
 # FHE Executor Server
 
-Lattica Gatehouse와 통신하여 FHE Job을 실행하는 Executor 서버입니다.
+An executor server that communicates with **Lattica Gatehouse** and runs FHE jobs.
 
-## 개요
+## Overview
 
-- **포트**: 3001
-- **Gatehouse 연결**: http://localhost:3000
-- **동작 방식**: 3000 포트의 Gatehouse에 폴링하며 Job 요청을 처리
+- **Port**: 3001  
+- **Gatehouse endpoint**: http://localhost:3000  
+- **How it works**: Polls the Gatehouse on port 3000 and processes incoming job requests.
 
-## 구조
+## Structure
 
 ```
 fhe_executor/
-├── FHE16/                  # FHE16 라이브러리 (lattica-gatehouse에서 복사)
-│   ├── index.js            # FFI 바인딩
-│   ├── dev-init.js         # 초기화 스크립트
-│   ├── lib/                # 네이티브 라이브러리
-│   └── store/              # 키 및 부트스트랩 파라미터
-├── server.js               # Executor 서버 메인 파일
+├── FHE16/                  # FHE16 library (copied from lattica-gatehouse)
+│   ├── index.js            # FFI bindings
+│   ├── dev-init.js         # Initialization script
+│   ├── lib/                # Native library
+│   └── store/              # Keys and bootstrap parameters
+├── server.js               # Executor server main file
 ├── package.json
 └── README.md
 ```
 
-## 워크플로우
+## Workflow
 
-1. **Job 조회**: GET /api/executor/jobs (5초마다 폴링)
-2. **Job 할당**: POST /api/executor/jobs/{job_pda}/claim
-3. **FHE 연산**: 로컬에서 암호문 간 연산 수행
-4. **결과 제출**: POST /api/executor/jobs/{job_pda}/result
+1. **Fetch jobs**: `GET /api/executor/jobs` (polls every 5 seconds)  
+2. **Claim job**: `POST /api/executor/jobs/{job_pda}/claim`  
+3. **FHE compute**: Perform ciphertext-to-ciphertext operations locally  
+4. **Submit result**: `POST /api/executor/jobs/{job_pda}/result`
 
-## 설치
+## Installation
+
+> **You must install and use Node 20.11.1 exactly**
 
 ```bash
 cd fhe_executor
+nvm install 20.11.1
+nvm use 20.11.1
+rm -rf node_modules package-lock.json
 npm install
 ```
 
-## 실행
+## Run
 
-### 개발 모드 (FHE16 초기화 포함)
+### Development mode (includes FHE16 initialization)
 
 ```bash
 npm run dev
 ```
 
-### 일반 실행
+### Normal run
 
 ```bash
 npm start
 ```
 
-## 엔드포인트
+## Endpoints
 
 ### Health Check
 ```bash
@@ -62,7 +67,7 @@ curl http://localhost:3001/health
 curl http://localhost:3001/status
 ```
 
-응답 예시:
+Example response:
 ```json
 {
   "executor_id": "FHE_Executor_1234567890",
@@ -73,30 +78,30 @@ curl http://localhost:3001/status
 }
 ```
 
-## 환경 요구사항
+## Environment Requirements
 
-- **OS**: Linux x86_64
-- **Node.js**: v18+ (권장 LTS)
-- **jemalloc**: 설치 권장 (TLS 에러 방지)
+- **OS**: Linux x86_64  
+- **Node.js**: **v20.11.1 (required)**  
+- **jemalloc**: recommended (to prevent TLS errors)
 
 ```bash
 sudo apt-get install -y libjemalloc2
 ```
 
-jemalloc을 사용하는 경우:
+If using jemalloc:
 ```bash
 LD_PRELOAD=/lib/x86_64-linux-gnu/libjemalloc.so.2 npm run dev
 ```
 
-## FHE 연산 구현
+## FHE Compute Implementation
 
-현재 `executeFHEComputation()` 함수는 플레이스홀더입니다. 실제 FHE 연산을 구현하려면:
+The current `executeFHEComputation()` is a placeholder. To implement real FHE operations:
 
 ```javascript
 async function executeFHEComputation(job) {
   const startTime = Date.now();
 
-  // FHE16 라이브러리 사용 예시
+  // Example with FHE16 library:
   // const ct1 = FHE16.lweFromBytes(job.input_cids[0].ciphertext);
   // const ct2 = FHE16.lweFromBytes(job.input_cids[1].ciphertext);
   // const result = FHE16.add(ct1, ct2);
@@ -106,21 +111,30 @@ async function executeFHEComputation(job) {
 
   return {
     success: true,
-    resultCiphertext: resultBytes, // 실제 암호문 결과
+    resultCiphertext: resultBytes, // actual ciphertext result
     executionTime
   };
 }
 ```
 
-## 복호화 기능 추가 (예정)
+## Decryption (Planned)
 
-추후 복호화 기능을 추가할 예정입니다:
+Planned additions:
 
-- 시크릿 키를 사용한 복호화
-- 결과 검증
-- 부분 복호화 지원
+- Decryption with the secret key  
+- Result verification  
+- Partial decryption support
 
-## 로그 예시
+## Manual asset download locations
+
+If you download assets manually, place them in **both** locations:
+
+```
+fhe16_executer/FHE16/store/boot/bootkey.bin
+fhe16_executer/FHE16/store/keys/secret.bin
+```
+
+## Log Example
 
 ```
 [FHE_EXECUTOR] Starting FHE Executor Server...
@@ -143,11 +157,11 @@ async function executeFHEComputation(job) {
 [FHE_EXECUTOR] Result submitted successfully
 ```
 
-## 참고
+## References
 
-- Gatehouse EXECUTOR_GUIDE: `lattica-gatehouse/EXECUTOR_GUIDE.md`
+- Gatehouse EXECUTOR_GUIDE: `lattica-gatehouse/EXECUTOR_GUIDE.md`  
 - FHE16 README: `FHE16/README.md`
 
-## 라이선스
+## License
 
 UNLICENSED (Private)
