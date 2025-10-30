@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "dev": "node ./FHE16/dev-init.js && node server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+	"postinstall": "bash ./scripts/fetch-release-assets.sh"
   },
   "dependencies": {
     "ffi-napi": "^4.0.3",
