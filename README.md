@@ -6,6 +6,27 @@ _Confidential program: privacy rail for institutions_
 
 **Good‑bye front‑running. Hello institutions.**
 
+
+
+
+
+## How to run
+- Go to `./lattica-gatehouse/` and follow its README exactly.
+- Then go to `./fhe_executor/` and follow its README exactly. Done.
+
+---
+
+> ⚠️ **Alert**
+>
+> In the FHE16 used here, for a simple implementation, **discrete Gaussian sampling is currently implemented as rounded Gaussian sampling**.
+>
+> It currently runs **only on Linux x86-64** machines **with AVX2** available.
+>
+> We will address these before the testnet launch and run simulations across various OSes so it can run on any device. **Until then, do not use this project for commercial purposes**; if you do, **we accept no legal liability**.
+
+
+
+
 ## Backers
 Currently raising seed round.
 
