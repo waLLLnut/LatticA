@@ -1,5 +1,7 @@
 # LatticA – Deterministic Confidential Computing for Solana
+
 _Confidential program: privacy rail for institutions_
+
 
 - LatticA builds **Next**, the Solana‑native confidential computing layer that makes encrypted data computable and verifiable anywhere — from mobile to server — through our portable **FHE16** stack (Fully Homomorphic Encryption).
 - Institutions can lend, swap, or manage risk without revealing private inputs until they choose to, establishing the foundation for deterministic, verifiable privacy on‑chain.
@@ -8,7 +10,7 @@ _Confidential program: privacy rail for institutions_
 
 
 
-
+### **INFO: Migration of this repository to the new architecture is currently in progress at https://github.com/waLLLnut/lattica-server.**
 
 ## How to run
 - Go to `./lattica-gatehouse/` and follow its README exactly.
@@ -45,7 +47,7 @@ Currently raising seed round.
 ## Watch / Connect
 - **3‑min Pitch** — https://youtu.be/1Tq4GxvcX2c
 - **Deck** — https://drive.google.com/file/d/1aV3UYl0_ScdfNpn0lZRFiQdtv2pnSr4t/view?usp=drive_link
-- **Technical Demo** — https://youtu.be/6wN0aE8Tw2o
+- **Technical Demo** — https://youtu.be/x6ZNc1cUd8U?si=EhGwiKjWEk9QWU_y
 - **Book a Call (Calendly)** — https://calendly.com/shlee-walllnut/30min
 - **Docs** — https://walllnut.gitbook.io/walllnut-docs
 - **𝕏 (Twitter)** — https://x.com/waLLLnut_co_Inc, https://x.com/LatticAwaLLLnut
